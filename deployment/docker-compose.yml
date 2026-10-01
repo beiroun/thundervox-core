@@ -8,11 +8,18 @@
 # opens the RTP port range without Docker port-mapping overhead. Linux only.
 #
 # Site-local values are NOT in this repository: the host address comes from .env
-# (copy .env.example), the kamailio secrets from configuration/local.cfg (copy
-# configuration/local.cfg.example). TVX_PUBLIC_IP in .env and TVX_PUBLIC_IP in
-# local.cfg MUST be the same real public IP — one feeds rtpengine, the other SIP.
+# (copy .env.example), the kamailio values and switches from
+# configuration/local.cfg (copy local.cfg.example), optional SIP credentials from
+# configuration/users.cfg (copy users.cfg.example, only with TVX_AUTH).
+# TVX_PUBLIC_IP in .env and TVX_PUBLIC_IP in local.cfg MUST be the same real
+# public IP — one feeds rtpengine, the other SIP.
 #
-# Firewall: open UDP 5060 (SIP) and UDP 29000-30000 (RTP) to the internet.
+# Firewall: open UDP+TCP 5060 (SIP) and UDP 29000-30000 (RTP) to the internet.
+#
+# Config check before (re)starting kamailio — fails fast on a typo:
+#   docker run --rm --entrypoint kamailio \
+#     -v "$PWD/configuration:/etc/kamailio:ro" \
+#     ghcr.io/kamailio/kamailio:6.0.1-bookworm -c -f /etc/kamailio/kamailio.cfg
 
 services:
   kamailio:
@@ -20,10 +27,11 @@ services:
     container_name: thundervox-kamailio
     network_mode: host
     volumes:
-      # read-only mounts: the routing logic is version-controlled in this repo,
-      # the site-local values (public IP, push URL, service token) are not
-      - ./configuration/kamailio.cfg:/etc/kamailio/kamailio.cfg:ro
-      - ./configuration/local.cfg:/etc/kamailio/local.cfg:ro
+      # The whole directory, read-only: kamailio.cfg is version-controlled, the
+      # site-local files (local.cfg, optional users.cfg) are gitignored. A
+      # directory mount lets kamailio "import_file" users.cfg only when it
+      # exists — a per-file mount of a missing file would create a bogus dir.
+      - ./configuration:/etc/kamailio:ro
     environment:
       - DBENGINE=NONE        # in-memory usrloc, no database (prototype scope)
       - TZ=Asia/Omsk

@@ -4,6 +4,8 @@ deployment/.env
 .env.local
 deployment/configuration/local.cfg
 local.cfg
+deployment/configuration/users.cfg
+users.cfg
 secrets.cfg
 *.secrets
 

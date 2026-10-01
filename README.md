@@ -40,6 +40,29 @@ Intercom (always registered)            ThunderVox               Mobile app (asl
 If the callee is **already registered** (e.g. a Zoiper softphone during testing),
 steps 3–6 are skipped and the INVITE is relayed immediately.
 
+Push-wait is a **switch** (`TVX_PUSH_WAIT` in `local.cfg`), off by default:
+without it an offline callee gets `480 Temporarily Unavailable` at once. That is
+the right mode while the push gateway is not deployed — plain calls between
+registered devices work exactly the same either way.
+
+### What the core handles
+
+| Case | Behaviour |
+|---|---|
+| REGISTER / unregister | one contact per AoR (latest registration wins), NAT-safe (`received`), keepalive pings for NATed contacts, `Expires` clamped to 60–3600 s |
+| INVITE, callee online | SDP anchored on rtpengine (audio + video), relayed to the registered contact |
+| INVITE, callee offline | `480` — or park + push with `TVX_PUSH_WAIT` |
+| CANCEL | media released, branch cancelled, `487` to the caller |
+| BYE (either side) | media released, relayed |
+| re-INVITE (hold / resume / codec or video change) | re-offer + re-answer; a rejected re-INVITE keeps the live media |
+| ACK | plain 2xx ACK, late-offer ACK with SDP (answer), negative-reply ACK |
+| UPDATE with SDP | early-media update |
+| INFO / NOTIFY inside a dialog | relayed untouched (SIP INFO DTMF = door open; RFC2833 DTMF rides inside RTP) |
+| OPTIONS to the server | `200 OK` (device keepalives / availability probes) |
+| Failures and timeouts | 3xx–6xx and `408` release the media |
+| Transport | UDP and TCP on 5060, one advertised public address |
+| Hygiene | scanner User-Agents dropped silently, retransmissions re-answered by tm, optional flood guard (`TVX_ANTIFLOOD`), optional digest auth (`TVX_AUTH`) |
+
 ---
 
 ## Components
@@ -47,7 +70,8 @@ steps 3–6 are skipped and the INVITE is relayed immediately.
 | Path | Role |
 |---|---|
 | `deployment/configuration/kamailio.cfg` | SIP signaling, registrar, NAT detection, push-wait routing |
-| `deployment/configuration/local.cfg.example` | Template for the site-local values (public IP, push URL, service token) |
+| `deployment/configuration/local.cfg.example` | Template for the site-local values (public IP, push URL, service token) and the feature switches |
+| `deployment/configuration/users.cfg.example` | Template for SIP credentials (only read with `TVX_AUTH`) |
 | `deployment/docker-compose.yml` | Kamailio + rtpengine, host-networked |
 | `deployment/.env.example` | Template for the host address docker compose feeds to rtpengine |
 | *(external)* push gateway | HTTP endpoint that delivers APNs/FCM pushes — **not** in this repo |
@@ -76,17 +100,26 @@ defines:
 | Constant | Meaning |
 |---|---|
 | `TVX_PUBLIC_IP` | Server public IP — advertised in SIP and used by rtpengine. |
-| `TVX_PUSH_URL` | Push gateway HTTP endpoint. |
+| `TVX_PUSH_URL` | Push gateway HTTP endpoint (used only with `TVX_PUSH_WAIT`). |
 | `TVX_PUSH_TOKEN` | Service token sent as `X-SERVICE-TOKEN`; must equal `SERVICE_TV_SIP_TOKEN` on the backend. |
+
+Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
+
+| Switch | Effect |
+|---|---|
+| `TVX_PUSH_WAIT` | Park INVITEs for offline callees and wake the device by push. Off: offline callee gets `480`. |
+| `TVX_AUTH` | Digest authentication for REGISTER (401) and INVITE (407). Needs `configuration/users.cfg` (copy `users.cfg.example`): `route[AUTH_PASSWORD]` maps the auth username to its password; the username must equal the device's SIP number. Off: the core is open — closed tests only. |
+| `TVX_ANTIFLOOD` | pike request-rate guard: more than 32 requests / 2 s from one IP are dropped. |
 
 `.env` holds `TVX_PUBLIC_IP` for docker compose, which passes it to rtpengine as
 `RTPENGINE_PUBLIC_IP`. **Both copies of `TVX_PUBLIC_IP` must be the same IP** —
 compose refuses to start when `.env` is missing.
 
 Non-secret tunables stay in `kamailio.cfg` itself: `TVX_RTP_FLAGS` (rtpengine
-per-leg flags, plain RTP/AVP with ICE stripped) and `TVX_RTPENGINE_SOCK`.
+per-leg flags, plain RTP/AVP with ICE stripped), `TVX_RTPENGINE_SOCK` and the
+tm timers (`fr_timer` 30 s, `fr_inv_timer` 120 s).
 
-Both `local.cfg` and `.env` are gitignored — keep them that way.
+`local.cfg`, `users.cfg` and `.env` are gitignored — keep them that way.
 
 ---
 
@@ -94,15 +127,31 @@ Both `local.cfg` and `.env` are gitignored — keep them that way.
 
 ```bash
 cd deployment
+# syntax/semantic check of the config before touching the running core
+docker run --rm --entrypoint kamailio -v "$PWD/configuration:/etc/kamailio:ro" \
+  ghcr.io/kamailio/kamailio:6.0.1-bookworm -c -f /etc/kamailio/kamailio.cfg
 docker compose up -d
-docker compose logs -f kamailio     # watch [TVX] routing logs
+docker compose logs -f kamailio | grep --line-buffered TVX   # routing decisions
+```
+
+Every kamailio log line is prefixed with `{<1=request|2=reply> <CSeq> <Call-ID>}`,
+so one call can be followed with a single `grep <Call-ID>`.
+
+Live state via `kamcmd` (ctl socket inside the container):
+
+```bash
+docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl ul.dump          # registrations
+docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl dlg.list         # live calls
+docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl dlg.stats_active # call counters
+docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl tm.stats         # transactions
+docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl rtpengine.show all
 ```
 
 **Firewall — open to the internet:**
 
 | Port | Proto | Purpose |
 |---|---|---|
-| 5060 | UDP | SIP signaling |
+| 5060 | UDP + TCP | SIP signaling |
 | 29000–30000 | UDP | RTP/RTCP media (rtpengine range; narrow test pool, widen for production) |
 
 ---
@@ -115,9 +164,12 @@ docker compose logs -f kamailio     # watch [TVX] routing logs
 3. Expect two-way audio (rtpengine relays it). Watch `[TVX]` logs for the routing
    decision (`callee ONLINE` vs `callee OFFLINE, parking + push`).
 
-To exercise the **push-wait** path, let the callee go **unregistered**, place the
-call (caller hears ringing, a push fires), then REGISTER the callee — the parked
-call connects.
+With push-wait off (default) a call to an unregistered number is answered with
+`480` immediately — the caller's device must handle that cleanly.
+
+To exercise the **push-wait** path, define `TVX_PUSH_WAIT` in `local.cfg`,
+restart kamailio, let the callee go **unregistered**, place the call (caller
+hears ringing, a push fires), then REGISTER the callee — the parked call connects.
 
 ---
 
@@ -126,13 +178,20 @@ call connects.
 - **Synchronous push.** `route[PUSH]` calls the gateway synchronously and can block
   a SIP worker for up to `connection_timeout` (2s). Production: async push-gateway
   microservice, fire-and-forget.
-- **No auth/ACL.** Any host may originate a call. Add authentication / source ACL
-  before public exposure.
-- **No persistence.** `usrloc` is in-memory (`db_mode=0`); registrations are lost on
-  restart. Add DB-mode + Redis for HA.
+- **Auth is a switch, off by default.** Without `TVX_AUTH` any host may register
+  any number and originate calls — closed tests only. Credentials live in a
+  config route (`users.cfg`), not a database; TLS and a real subscriber store
+  are v1.
+- **One contact per AoR.** A second device registering the same number replaces
+  the first. Multi-device users need parallel forking with per-branch rtpengine
+  sessions (`via-branch` in a branch route) — v1.
+- **No persistence.** `usrloc` and `dialog` are in-memory; registrations and
+  call state are lost on restart. Add DB-mode + Redis for HA.
 - **Single node.** One Kamailio + one rtpengine. Horizontal scale (dispatcher to a
   media pool, HA registrar) is the v1 target.
-- **rtpengine image not pinned.** Pin a tag/digest before production.
+- **Dead contacts are discovered late.** A NATed device that vanished without
+  unregistering is only noticed when a call to it times out (`fr_timer` 30 s).
+  usrloc keepalive with OPTIONS and contact purging is a v1 item.
 
 ---
 
