@@ -7,9 +7,16 @@
 # strings, so a value can appear both bare (listen/advertise) and inside JSON
 # (push body) with the same definition.
 
-# Server public IP. MUST equal TVX_PUBLIC_IP in deployment/.env (which feeds
-# RTPENGINE_PUBLIC_IP). Advertised in Via/Record-Route/Contact so signaling is
-# reachable even when the host interface holds a private (1:1 cloud-NATed) address.
+# ---- Server address: at least one of the two below must be set. ----
+
+# SIP domain (preferred): the DNS name that resolves to this server. Devices
+# register to it and dial through it (sip:102@sip.example.com). When set, the
+# core works through it - advertised in Via/Record-Route and treated as "myself".
+#!substdef "!TVX_SIP_DOMAIN!sip.example.com!g"
+
+# Server public IP. Advertised instead of the domain when TVX_SIP_DOMAIN is not
+# set; otherwise only accepted as "myself" for devices that dial by raw IP.
+# Keep it equal to TVX_PUBLIC_IP in deployment/.env (which feeds rtpengine).
 #!substdef "!TVX_PUBLIC_IP!203.0.113.10!g"
 
 # Push gateway: HTTP endpoint that delivers APNs/FCM pushes to wake the device.
