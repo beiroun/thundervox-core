@@ -1,0 +1,26 @@
+# ThunderVox — SIP credentials (template, only read when TVX_AUTH is defined)
+# ==========================================================================
+# Copy to users.cfg and fill in. users.cfg is gitignored. kamailio.cfg pulls it
+# in with import_file at the very end, so this route may use any loaded module.
+#
+# route[AUTH_PASSWORD] is called for every REGISTER and INVITE. $au is the
+# username from the Authorization/Proxy-Authorization header (empty on the
+# first, unauthenticated request). Set $avp(password) to the user's plaintext
+# password; leave it unset for unknown users — route[AUTH] then answers 403.
+#
+# The username a device authenticates with must equal its SIP number (the To
+# user on REGISTER, the From user on INVITE) — route[AUTH] enforces that.
+
+route[AUTH_PASSWORD] {
+    switch($au) {
+        case "101":
+            $avp(password) = "change-me-101";
+            break;
+        case "201":
+            $avp(password) = "change-me-201";
+            break;
+        default:
+            # unknown user: $avp(password) stays unset
+            break;
+    }
+}
