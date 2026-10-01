@@ -99,7 +99,8 @@ defines:
 
 | Constant | Meaning |
 |---|---|
-| `TVX_PUBLIC_IP` | Server public IP — advertised in SIP and used by rtpengine. |
+| `TVX_SIP_DOMAIN` | DNS name of the server (preferred). Devices register to it and dial through it; when set, the core advertises it in Via/Record-Route and treats it as its own domain. |
+| `TVX_PUBLIC_IP` | Server public IP. Advertised instead of the domain when `TVX_SIP_DOMAIN` is absent; otherwise only accepted as "myself" for devices that dial by raw IP. Must equal the value in `.env` (rtpengine). **At least one of the two must be set.** |
 | `TVX_PUSH_URL` | Push gateway HTTP endpoint (used only with `TVX_PUSH_WAIT`). |
 | `TVX_PUSH_TOKEN` | Service token sent as `X-SERVICE-TOKEN`; must equal `SERVICE_TV_SIP_TOKEN` on the backend. |
 
@@ -113,7 +114,9 @@ Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
 
 `.env` holds `TVX_PUBLIC_IP` for docker compose, which passes it to rtpengine as
 `RTPENGINE_PUBLIC_IP`. **Both copies of `TVX_PUBLIC_IP` must be the same IP** —
-compose refuses to start when `.env` is missing.
+compose refuses to start when `.env` is missing. A `local.cfg` with
+neither `TVX_SIP_DOMAIN` nor `TVX_PUBLIC_IP` fails the config check with the
+token `NEITHER_TVX_SIP_DOMAIN_NOR_TVX_PUBLIC_IP_IS_DEFINED_IN_LOCAL_CFG`.
 
 Non-secret tunables stay in `kamailio.cfg` itself: `TVX_RTP_FLAGS` (rtpengine
 per-leg flags, plain RTP/AVP with ICE stripped), `TVX_RTPENGINE_SOCK` and the
