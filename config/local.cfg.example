@@ -18,7 +18,7 @@
 
 # Server public IP. Advertised instead of the domain when TVX_SIP_DOMAIN is not
 # set; otherwise only accepted as "myself" for devices that dial by raw IP.
-# Keep it equal to TVX_PUBLIC_IP in deployment/.env (which feeds rtpengine).
+# Keep it equal to TVX_PUBLIC_IP in the deployment .env (thundervox/deploy/.env, which feeds rtpengine).
 #!substdef "!TVX_PUBLIC_IP!203.0.113.10!g"
 
 # Push gateway: HTTP endpoint that delivers APNs/FCM pushes to wake the device.
@@ -36,11 +36,6 @@
 # http_client). Without it an offline callee gets "480 Temporarily Unavailable"
 # immediately — the right mode while the push gateway is not deployed.
 ##!define TVX_PUSH_WAIT
-
-# Digest authentication for REGISTER (401) and INVITE (407). Needs users.cfg
-# (copy users.cfg.example). Without it the core is OPEN: anyone can register any
-# number and place calls — acceptable only for a closed test.
-##!define TVX_AUTH
 
 # Request-rate guard per source IP (pike): >32 requests / 2 s -> dropped.
 ##!define TVX_ANTIFLOOD

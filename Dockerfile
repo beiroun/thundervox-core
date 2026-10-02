@@ -59,8 +59,10 @@ RUN groupadd --system kamailio \
  && mkdir -p /etc/kamailio /run/kamailio \
  && chown kamailio:kamailio /run/kamailio
 
-# The ThunderVox routing logic lives in the image; it pulls /etc/kamailio/local.cfg (mounted) for site values
-COPY deployment/configuration/kamailio.cfg /etc/kamailio/kamailio.cfg
+# The ThunderVox routing logic lives in the image; it pulls /etc/kamailio/local.cfg (mounted) for site values.
+# The template of that file ships with the image too, so the deployment needs no copy of it:
+#   docker run --rm --entrypoint cat <image> /etc/kamailio/local.cfg.example > local.cfg
+COPY config/kamailio.cfg config/local.cfg.example /etc/kamailio/
 
 USER kamailio
 # Host-networked in the compose deployment; informational
