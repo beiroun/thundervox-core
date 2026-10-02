@@ -61,6 +61,7 @@ registered devices work exactly the same either way.
 | OPTIONS to the server | `200 OK` (device keepalives / availability probes) |
 | Failures and timeouts | 3xx–6xx and `408` release the media |
 | Transport | UDP and TCP on 5060, one advertised public address |
+| Caller identity | the calling device is the one registered from the source socket (ip:port → AoR, kept in an htable on REGISTER), never the From header — intercom firmwares put the apartment number there. An INVITE from a source that never registered gets `403 Caller Not Registered` |
 | Hygiene | scanner User-Agents dropped silently, retransmissions re-answered by tm, optional flood guard (`TVX_ANTIFLOOD`), optional digest auth (`TVX_AUTH`) |
 
 ---
@@ -109,7 +110,7 @@ Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
 | Switch | Effect |
 |---|---|
 | `TVX_PUSH_WAIT` | Park INVITEs for offline callees and wake the device by push. Off: offline callee gets `480`. |
-| `TVX_AUTH` | Digest authentication for REGISTER (401) and INVITE (407). Needs `configuration/users.cfg` (copy `users.cfg.example`): `route[AUTH_PASSWORD]` maps the auth username to its password; the username must equal the device's SIP number. Off: the core is open — closed tests only. |
+| `TVX_AUTH` | Digest authentication for REGISTER (401) and INVITE (407). Needs `configuration/users.cfg` (copy `users.cfg.example`): `route[AUTH_PASSWORD]` maps the auth username to its password. On REGISTER the auth username must equal the To user; on INVITE the authenticated username *is* the caller identity (the From header is not compared — it carries vendor data such as the apartment number). `users.cfg` is a stub: credentials move to a database with the provisioning layer. Off: anyone may register any number — closed tests only. |
 | `TVX_ANTIFLOOD` | pike request-rate guard: more than 32 requests / 2 s from one IP are dropped. |
 
 `.env` holds `TVX_PUBLIC_IP` for docker compose, which passes it to rtpengine as
@@ -168,7 +169,9 @@ docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl rtpengine.show 
    decision (`callee ONLINE` vs `callee OFFLINE, parking + push`).
 
 With push-wait off (default) a call to an unregistered number is answered with
-`480` immediately — the caller's device must handle that cleanly.
+`480` immediately — the caller's device must handle that cleanly. A call *from*
+a softphone that is not registered itself is answered with `403 Caller Not
+Registered`: register first, then dial.
 
 To exercise the **push-wait** path, define `TVX_PUSH_WAIT` in `local.cfg`,
 restart kamailio, let the callee go **unregistered**, place the call (caller
@@ -182,9 +185,11 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
   a SIP worker for up to `connection_timeout` (2s). Production: async push-gateway
   microservice, fire-and-forget.
 - **Auth is a switch, off by default.** Without `TVX_AUTH` any host may register
-  any number and originate calls — closed tests only. Credentials live in a
-  config route (`users.cfg`), not a database; TLS and a real subscriber store
-  are v1.
+  any number — closed tests only. Calls are accepted only from registered
+  sources (`403` otherwise), which keeps fraud probes out but does not stop a
+  stranger from registering a number they do not own. Credentials live in a
+  config route (`users.cfg`) for now; the real subscriber store comes with the
+  provisioning layer (database + UI), TLS is v1.
 - **One contact per AoR.** A second device registering the same number replaces
   the first. Multi-device users need parallel forking with per-branch rtpengine
   sessions (`via-branch` in a branch route) — v1.
