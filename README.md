@@ -1,10 +1,16 @@
-# ThunderVox
+# ThunderVox Core
 
 **The REAL SIP server** — a thin, scalable SIP endpoint platform for physical
 devices (intercoms, elevators, gates, SOS points) that place calls to mobile apps
 which are *not* continuously registered.
 
-Built on **Kamailio** (signaling + registrar) and **rtpengine** (media + NAT).
+This repository is the **signaling and media core** of the
+[ThunderVox](https://github.com/beiroun/thundervox) platform, built on
+**Kamailio** (signaling + registrar) and **rtpengine** (media + NAT). The
+provisioning server and the web console live in their own repositories
+([`thundervox-server`](https://github.com/beiroun/thundervox-server),
+[`thundervox-web`](https://github.com/beiroun/thundervox-web)); the umbrella
+repository holds the project charter and the deployment of the whole system.
 
 ---
 
@@ -141,6 +147,14 @@ docker compose logs -f kamailio | grep --line-buffered TVX   # routing decisions
 Every kamailio log line is prefixed with `{<1=request|2=reply> <CSeq> <Call-ID>}`,
 so one call can be followed with a single `grep <Call-ID>`.
 
+**Images.** The compose file still runs the upstream
+`ghcr.io/kamailio/kamailio:6.0.1-bookworm` and `fonoster/rtpengine:0.3.17`
+images. The core is moving to its **own images built from source** —
+`ghcr.io/beiroun/thundervox-core` (Kamailio 6.0.8, config baked in, `local.cfg`
+mounted) and `ghcr.io/beiroun/thundervox-rtpengine` (rtpengine mr26.2.1.2) —
+so that nothing at runtime depends on third-party packages or images. See
+Roadmap.
+
 Live state via `kamcmd` (ctl socket inside the container):
 
 ```bash
@@ -205,6 +219,24 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 
 ## Roadmap
 
-- **v0** — Docker Compose, single host *(current)*.
+- **v0.6** — Docker Compose on a single host, upstream images *(current)*.
+  Stable calls between registered devices, caller identity by registration,
+  push-wait as a switch.
+- **v0.7** — provisioning layer: `auth_db` against PostgreSQL (`TVX_PROVISIONING`
+  replaces `TVX_AUTH` / `users.cfg`), registrations persisted (`usrloc`
+  write-through), JSON-RPC for the server; own images built from source
+  (Kamailio 6.0.8, rtpengine mr26.2.1.2), published to GHCR by CI, the host
+  keeps only compose + config.
 - **v1** — Kubernetes: stateless Kamailio edge (HA), rtpengine media pool behind
-  `dispatcher`, Redis-backed presence, async push service, DB-backed location.
+  `dispatcher`, Redis-backed presence, async push service.
+
+---
+
+## License
+
+**Business Source License 1.1** — see [`LICENSE`](LICENSE). Non-production
+use is free; production use beyond the Additional Use Grant requires a
+commercial license from the Licensor. The license applies to the ThunderVox
+code in this repository (configuration, build files, documentation).
+Kamailio and rtpengine remain under their own licenses (GPL); see `NOTICE`
+in the umbrella repository.
