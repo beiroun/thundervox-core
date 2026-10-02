@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Every push and pull request: build both images and check the configuration inside the core image.
+# `kamailio -c` runs twice - with the example local.cfg (default switches) and with every switch on - so a
+# missing module or a typo in a switched-off branch fails here, not on the server. Nothing is pushed.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build core image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: thundervox-core:ci
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+      - name: Prepare config fixtures
+        run: |
+          cp deployment/configuration/local.cfg.example ci/local.cfg
+          # every switch on: the ##!define lines of the example become #!define
+          sed 's/^##!define /#!define /' deployment/configuration/local.cfg.example > ci/local-all-switches.cfg
+          cp deployment/configuration/users.cfg.example ci/users.cfg
+      - name: Kamailio version
+        run: docker run --rm thundervox-core:ci -v
+      - name: Config check, default switches
+        run: |
+          docker run --rm \
+            -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
+            thundervox-core:ci -c -f /etc/kamailio/kamailio.cfg
+      - name: Config check, every switch on (tsilo, http_client, auth, pike)
+        run: |
+          docker run --rm \
+            -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
+            -v "$PWD/ci/users.cfg:/etc/kamailio/users.cfg:ro" \
+            thundervox-core:ci -c -f /etc/kamailio/kamailio.cfg
+      - name: Modules the provisioning layer needs are present
+        run: |
+          docker run --rm --entrypoint sh thundervox-core:ci -c \
+            'for m in db_postgres auth_db xhttp jsonrpcs http_client tsilo htable dialog pike rtpengine; do \
+               ls /usr/local/lib*/kamailio/modules/$m.so; done'
+
+  rtpengine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build rtpengine image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: rtpengine/Dockerfile
+          push: false
+          load: true
+          tags: thundervox-rtpengine:ci
+          cache-from: type=gha,scope=rtpengine
+          cache-to: type=gha,mode=max,scope=rtpengine
+      - name: rtpengine starts and parses its flags
+        run: docker run --rm --entrypoint rtpengine thundervox-rtpengine:ci --help

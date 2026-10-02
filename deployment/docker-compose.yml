@@ -1,58 +1,56 @@
 # SPDX-License-Identifier: BUSL-1.1
 # Copyright (c) 2026 Andrei Baranov (84softworks). Licensed under the Business Source License 1.1 - see LICENSE.
-# ThunderVox — SIP core deployment (prototype, single host)
-# ==========================================================
-# Two host-networked containers:
-#   - kamailio:   SIP signaling + registrar + push-wait routing
+# ThunderVox - SIP core deployment (core only, single host, own images)
+# =====================================================================
+# Two host-networked containers from the images this repository builds:
+#   - core:       SIP signaling + registrar + push-wait routing (Kamailio, config inside the image)
 #   - rtpengine:  media (RTP/RTCP) relay + NAT traversal, UDP ports 29000-30000
 #
-# Host networking is required so rtpengine uses the host's public IP directly and
-# opens the RTP port range without Docker port-mapping overhead. Linux only.
+# Image tags are pinned to the repository release that was tested together; "latest" does not exist.
+# Updating = change the tag -> docker compose pull && docker compose up -d. No sources, no builds on the host.
 #
-# Site-local values are NOT in this repository: the host address comes from .env
-# (copy .env.example), the kamailio values and switches from
-# configuration/local.cfg (copy local.cfg.example), optional SIP credentials from
-# configuration/users.cfg (copy users.cfg.example, only with TVX_AUTH).
-# TVX_PUBLIC_IP in .env and TVX_PUBLIC_IP in local.cfg MUST be the same real
-# public IP — one feeds rtpengine, the other SIP.
+# Host networking is required so rtpengine uses the host's public IP directly and opens the RTP port range
+# without Docker port-mapping overhead. Linux only.
+#
+# Site-local values are NOT in this repository: the host address comes from .env (copy .env.example), the
+# kamailio values and switches from configuration/local.cfg (copy local.cfg.example). kamailio.cfg itself
+# lives in the image. TVX_PUBLIC_IP in .env and TVX_PUBLIC_IP in local.cfg MUST be the same real public IP -
+# one feeds rtpengine, the other SIP.
 #
 # Firewall: open UDP+TCP 5060 (SIP) and UDP 29000-30000 (RTP) to the internet.
 #
-# Config check before (re)starting kamailio — fails fast on a typo:
-#   docker run --rm --entrypoint kamailio \
-#     -v "$PWD/configuration:/etc/kamailio:ro" \
-#     ghcr.io/kamailio/kamailio:6.0.1-bookworm -c -f /etc/kamailio/kamailio.cfg
+# Config check before (re)starting the core - fails fast on a typo in local.cfg:
+#   docker compose run --rm core -c -f /etc/kamailio/kamailio.cfg
+#
+# The full system (core, rtpengine, postgres, server, web) is composed in the umbrella repository
+# github.com/beiroun/thundervox; this file runs the core alone, e.g. for bare tests without provisioning.
 
 services:
-  kamailio:
-    image: ghcr.io/kamailio/kamailio:6.0.1-bookworm
-    container_name: thundervox-kamailio
+  core:
+    image: ghcr.io/beiroun/thundervox-core:0.6.1
+    container_name: thundervox-core
     network_mode: host
     volumes:
-      # The whole directory, read-only: kamailio.cfg is version-controlled, the
-      # site-local files (local.cfg, optional users.cfg) are gitignored. A
-      # directory mount lets kamailio "import_file" users.cfg only when it
-      # exists — a per-file mount of a missing file would create a bogus dir.
-      - ./configuration:/etc/kamailio:ro
+      # Only the site-local file is mounted; kamailio.cfg is part of the image. A missing local.cfg fails
+      # the start on purpose (include_file) instead of running with somebody else's defaults.
+      - ./configuration/local.cfg:/etc/kamailio/local.cfg:ro
     environment:
-      - DBENGINE=NONE        # in-memory usrloc, no database (prototype scope)
-      - TZ=Asia/Omsk
+      TZ: "Asia/Omsk"
     depends_on:
-      - rtpengine            # ordering only; kamailio retries the ng socket at runtime
+      - rtpengine            # ordering only; the core retries the ng socket at runtime
     restart: always
 
   rtpengine:
-    # Pinned tag (= what "latest" resolved to on 2026-09-15): SIP is about
-    # stability, deploys must be reproducible.
-    image: fonoster/rtpengine:0.3.17
+    image: ghcr.io/beiroun/thundervox-rtpengine:0.6.1
     container_name: thundervox-rtpengine
     network_mode: host
     environment:
-      # fails fast if .env is missing instead of binding media on a bogus address
-      RTPENGINE_PUBLIC_IP: "${TVX_PUBLIC_IP:?set TVX_PUBLIC_IP in deployment/.env}"
-      RTPENGINE_BIND_NG_PORT: "4444"          # ng control port kamailio talks to
-      RTPENGINE_PORT_MIN: "29000"             # narrow test pool (~250 concurrent calls); widen for production
-      RTPENGINE_PORT_MAX: "30000"
-      RTPENGINE_LOG_LEVEL: "6"                # 6=info; raise to 7 for verbose media debug
+      # fails fast if .env is missing instead of advertising media on a bogus address
+      TVX_PUBLIC_IP: "${TVX_PUBLIC_IP:?set TVX_PUBLIC_IP in deployment/.env}"
+      # TVX_LOCAL_IP: "10.0.0.5"             # only when the host's interface address differs from the public one (1:1 NAT)
+      TVX_RTP_NG_PORT: "4444"                 # ng control port on 127.0.0.1; the core's TVX_RTPENGINE_SOCK points here
+      TVX_RTP_PORT_MIN: "29000"               # narrow test pool (~250 concurrent calls); widen for production
+      TVX_RTP_PORT_MAX: "30000"
+      TVX_RTP_LOG_LEVEL: "6"                  # 6=info; 7 for verbose media debug
       TZ: "Asia/Omsk"
     restart: always

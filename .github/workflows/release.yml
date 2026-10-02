@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Tag vX.Y.Z -> ghcr.io/beiroun/thundervox-core:X.Y.Z and ghcr.io/beiroun/thundervox-rtpengine:X.Y.Z.
+# The two images share the repository's version: the core config and the media relay it was tested with ship
+# together. "latest" is never published; the deployment compose pins exact versions.
+# The core image is config-checked before it is pushed.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/beiroun/thundervox-core
+          tags: type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.licenses=BUSL-1.1
+            org.opencontainers.image.title=ThunderVox Core
+      - name: Build (local) for the config check
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: thundervox-core:release-check
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+      - name: Config check before publishing
+        run: |
+          cp deployment/configuration/local.cfg.example ci/local.cfg
+          sed 's/^##!define /#!define /' deployment/configuration/local.cfg.example > ci/local-all-switches.cfg
+          cp deployment/configuration/users.cfg.example ci/users.cfg
+          docker run --rm -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
+            thundervox-core:release-check -c -f /etc/kamailio/kamailio.cfg
+          docker run --rm -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
+            -v "$PWD/ci/users.cfg:/etc/kamailio/users.cfg:ro" \
+            thundervox-core:release-check -c -f /etc/kamailio/kamailio.cfg
+      - name: Push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=core
+
+  rtpengine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/beiroun/thundervox-rtpengine
+          tags: type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.licenses=BUSL-1.1
+            org.opencontainers.image.title=ThunderVox rtpengine
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: rtpengine/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=rtpengine
+          cache-to: type=gha,mode=max,scope=rtpengine
