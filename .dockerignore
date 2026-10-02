@@ -1,0 +1,9 @@
+# Secrets and site-local files must never enter an image
+deployment/.env
+deployment/configuration/local.cfg
+deployment/configuration/users.cfg
+.git
+.github
+.idea
+ci
+*.md

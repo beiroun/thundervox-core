@@ -79,8 +79,12 @@ registered devices work exactly the same either way.
 | `deployment/configuration/kamailio.cfg` | SIP signaling, registrar, NAT detection, push-wait routing |
 | `deployment/configuration/local.cfg.example` | Template for the site-local values (public IP, push URL, service token) and the feature switches |
 | `deployment/configuration/users.cfg.example` | Template for SIP credentials (only read with `TVX_AUTH`) |
-| `deployment/docker-compose.yml` | Kamailio + rtpengine, host-networked |
+| `deployment/docker-compose.yml` | Core + rtpengine from the images below, host-networked (core only; the whole system is composed in the umbrella repository) |
 | `deployment/.env.example` | Template for the host address docker compose feeds to rtpengine |
+| `Dockerfile` | Core image: Kamailio **6.0.8 built from source** (default module group + `db_postgres`, `http_client`), `kamailio.cfg` baked in, non-root |
+| `rtpengine/Dockerfile`, `rtpengine/entrypoint.sh` | Media image: rtpengine **mr26.2.1.2 built from source**, userspace forwarding, every parameter an explicit flag from `TVX_*` environment |
+| `docker/runtime-deps.sh` | Build helper: derives the runtime Debian packages from what the binaries actually link against |
+| `.github/workflows/` | `ci.yml` builds both images and runs `kamailio -c` on every push; `release.yml` publishes `ghcr.io/beiroun/thundervox-core` and `…/thundervox-rtpengine` on a `vX.Y.Z` tag |
 | *(external)* push gateway | HTTP endpoint that delivers APNs/FCM pushes — **not** in this repo |
 
 **NAT strategy:** the *received* method for registered devices
@@ -137,32 +141,44 @@ tm timers (`fr_timer` 30 s, `fr_inv_timer` 120 s).
 
 ```bash
 cd deployment
-# syntax/semantic check of the config before touching the running core
-docker run --rm --entrypoint kamailio -v "$PWD/configuration:/etc/kamailio:ro" \
-  ghcr.io/kamailio/kamailio:6.0.1-bookworm -c -f /etc/kamailio/kamailio.cfg
-docker compose up -d
-docker compose logs -f kamailio | grep --line-buffered TVX   # routing decisions
+# syntax/semantic check of local.cfg against the config inside the image, before touching the running core
+docker compose run --rm core -c -f /etc/kamailio/kamailio.cfg
+docker compose pull && docker compose up -d
+docker compose logs -f core | grep --line-buffered TVX   # routing decisions
 ```
 
 Every kamailio log line is prefixed with `{<1=request|2=reply> <CSeq> <Call-ID>}`,
 so one call can be followed with a single `grep <Call-ID>`.
 
-**Images.** The compose file still runs the upstream
-`ghcr.io/kamailio/kamailio:6.0.1-bookworm` and `fonoster/rtpengine:0.3.17`
-images. The core is moving to its **own images built from source** —
-`ghcr.io/beiroun/thundervox-core` (Kamailio 6.0.8, config baked in, `local.cfg`
-mounted) and `ghcr.io/beiroun/thundervox-rtpengine` (rtpengine mr26.2.1.2) —
-so that nothing at runtime depends on third-party packages or images. See
-Roadmap.
+**Images.** The compose file runs the images this repository builds:
+`ghcr.io/beiroun/thundervox-core` (Kamailio 6.0.8 from source, `kamailio.cfg`
+inside, only `local.cfg` mounted) and `ghcr.io/beiroun/thundervox-rtpengine`
+(rtpengine mr26.2.1.2 from source). Both are built on `debian:trixie-slim`, run
+as non-root users, and carry the version of the git tag they were built from -
+the two always ship together. Nothing at runtime depends on third-party packages
+or images; the host keeps only this compose file, `.env` and `local.cfg`.
+
+The rtpengine image takes its parameters from the environment
+(`TVX_PUBLIC_IP`, optional `TVX_LOCAL_IP` for 1:1 NAT hosts, `TVX_RTP_NG_PORT`,
+`TVX_RTP_PORT_MIN`/`MAX`, `TVX_RTP_LOG_LEVEL`) and turns them into explicit
+rtpengine flags; the ng control socket listens on `127.0.0.1` only, matching the
+core's `TVX_RTPENGINE_SOCK`.
+
+Building locally (not needed on the server - CI publishes the images):
+
+```bash
+docker build -t thundervox-core:dev .
+docker build -t thundervox-rtpengine:dev -f rtpengine/Dockerfile .
+```
 
 Live state via `kamcmd` (ctl socket inside the container):
 
 ```bash
-docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl ul.dump          # registrations
-docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl dlg.list         # live calls
-docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl dlg.stats_active # call counters
-docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl tm.stats         # transactions
-docker exec thundervox-kamailio kamcmd -s unix:/tmp/kamailio_ctl rtpengine.show all
+docker exec thundervox-core kamcmd -s unix:/tmp/kamailio_ctl ul.dump          # registrations
+docker exec thundervox-core kamcmd -s unix:/tmp/kamailio_ctl dlg.list         # live calls
+docker exec thundervox-core kamcmd -s unix:/tmp/kamailio_ctl dlg.stats_active # call counters
+docker exec thundervox-core kamcmd -s unix:/tmp/kamailio_ctl tm.stats         # transactions
+docker exec thundervox-core kamcmd -s unix:/tmp/kamailio_ctl rtpengine.show all
 ```
 
 **Firewall — open to the internet:**
@@ -219,14 +235,15 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 
 ## Roadmap
 
-- **v0.6** — Docker Compose on a single host, upstream images *(current)*.
+- **v0.6** — Docker Compose on a single host, upstream images.
   Stable calls between registered devices, caller identity by registration,
   push-wait as a switch.
+- **v0.6.1** — the same core on **own images built from source** (Kamailio
+  6.0.8, rtpengine mr26.2.1.2), published to GHCR by CI; the host keeps only
+  compose + config *(current)*.
 - **v0.7** — provisioning layer: `auth_db` against PostgreSQL (`TVX_PROVISIONING`
   replaces `TVX_AUTH` / `users.cfg`), registrations persisted (`usrloc`
-  write-through), JSON-RPC for the server; own images built from source
-  (Kamailio 6.0.8, rtpengine mr26.2.1.2), published to GHCR by CI, the host
-  keeps only compose + config.
+  write-through), JSON-RPC for the server.
 - **v1** — Kubernetes: stateless Kamailio edge (HA), rtpengine media pool behind
   `dispatcher`, Redis-backed presence, async push service.
 
