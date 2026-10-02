@@ -68,7 +68,7 @@ registered devices work exactly the same either way.
 | Failures and timeouts | 3xx–6xx and `408` release the media |
 | Transport | UDP and TCP on 5060, one advertised public address |
 | Caller identity | the calling device is the one registered from the source socket (ip:port → AoR, kept in an htable on REGISTER), never the From header — intercom firmwares put the apartment number there. An INVITE from a source that never registered gets `403 Caller Not Registered` |
-| Hygiene | scanner User-Agents dropped silently, retransmissions re-answered by tm, optional flood guard (`TVX_ANTIFLOOD`), optional digest auth (`TVX_AUTH`) |
+| Hygiene | scanner User-Agents dropped silently, retransmissions re-answered by tm, optional flood guard (`TVX_ANTIFLOOD`) |
 
 ---
 
@@ -76,15 +76,12 @@ registered devices work exactly the same either way.
 
 | Path | Role |
 |---|---|
-| `deployment/configuration/kamailio.cfg` | SIP signaling, registrar, NAT detection, push-wait routing |
-| `deployment/configuration/local.cfg.example` | Template for the site-local values (public IP, push URL, service token) and the feature switches |
-| `deployment/configuration/users.cfg.example` | Template for SIP credentials (only read with `TVX_AUTH`) |
-| `deployment/docker-compose.yml` | Core + rtpengine from the images below, host-networked (core only; the whole system is composed in the umbrella repository) |
-| `deployment/.env.example` | Template for the host address docker compose feeds to rtpengine |
+| `config/kamailio.cfg` | SIP signaling, registrar, NAT detection, push-wait routing |
+| `config/local.cfg.example` | Template for the site-local values (public IP, push URL, service token) and the feature switches; shipped inside the image at `/etc/kamailio/local.cfg.example` |
 | `Dockerfile` | Core image: Kamailio **6.0.8 built from source** (default module group + `db_postgres`, `http_client`), `kamailio.cfg` baked in, non-root |
 | `rtpengine/Dockerfile`, `rtpengine/entrypoint.sh` | Media image: rtpengine **mr26.2.1.2 built from source**, userspace forwarding, every parameter an explicit flag from `TVX_*` environment |
 | `docker/runtime-deps.sh` | Build helper: derives the runtime Debian packages from what the binaries actually link against |
-| `.github/workflows/` | `ci.yml` builds both images and runs `kamailio -c` on every push; `release.yml` publishes `ghcr.io/beiroun/thundervox-core` and `…/thundervox-rtpengine` on a `vX.Y.Z` tag |
+| `.github/workflows/` | `ci.yml` builds both images and runs `kamailio -c` on every push to `release`; `release.yml` publishes `ghcr.io/beiroun/thundervox-core` and `…/thundervox-rtpengine` on a `vX.Y.Z` tag |
 | *(external)* push gateway | HTTP endpoint that delivers APNs/FCM pushes — **not** in this repo |
 
 **NAT strategy:** the *received* method for registered devices
@@ -94,24 +91,26 @@ anchored on `rtpengine`, so RTP never needs a direct path between the two UAs.
 
 ---
 
-## Configure
+## Configure and run
 
-Site-local values are **not** in this repository — no address, endpoint or token
-is committed. Create both files from their templates:
+The core is **deployed from the umbrella repository**
+[`thundervox`](https://github.com/beiroun/thundervox) (`deploy/docker-compose.yml`,
+`.env`, `local.cfg`, runbook) — this repository only builds the images and holds
+the configuration they bake in. Site-local values are not committed anywhere:
+`local.cfg` is created from the template that ships inside the image and
+mounted into the core container at `/etc/kamailio/local.cfg`; `config/` in
+this repository is what the image bakes in, not a deployment:
 
 ```bash
-cd deployment
-cp configuration/local.cfg.example configuration/local.cfg
-cp .env.example .env
+docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.7.0 /etc/kamailio/local.cfg.example > local.cfg
 ```
 
-`configuration/local.cfg` is pulled into `kamailio.cfg` by `include_file` and
-defines:
+`local.cfg` is pulled into `kamailio.cfg` by `include_file` and defines:
 
 | Constant | Meaning |
 |---|---|
 | `TVX_SIP_DOMAIN` | DNS name of the server (preferred). Devices register to it and dial through it; when set, the core advertises it in Via/Record-Route and treats it as its own domain. |
-| `TVX_PUBLIC_IP` | Server public IP. Advertised instead of the domain when `TVX_SIP_DOMAIN` is absent; otherwise only accepted as "myself" for devices that dial by raw IP. Must equal the value in `.env` (rtpengine). **At least one of the two must be set.** |
+| `TVX_PUBLIC_IP` | Server public IP. Advertised instead of the domain when `TVX_SIP_DOMAIN` is absent; otherwise only accepted as "myself" for devices that dial by raw IP. Must equal the address rtpengine advertises (`TVX_PUBLIC_IP` in the deployment `.env`). **At least one of the two must be set.** |
 | `TVX_PUSH_URL` | Push gateway HTTP endpoint (used only with `TVX_PUSH_WAIT`). |
 | `TVX_PUSH_TOKEN` | Service token sent as `X-SERVICE-TOKEN`; must equal `SERVICE_TV_SIP_TOKEN` on the backend. |
 
@@ -120,43 +119,30 @@ Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
 | Switch | Effect |
 |---|---|
 | `TVX_PUSH_WAIT` | Park INVITEs for offline callees and wake the device by push. Off: offline callee gets `480`. |
-| `TVX_AUTH` | Digest authentication for REGISTER (401) and INVITE (407). Needs `configuration/users.cfg` (copy `users.cfg.example`): `route[AUTH_PASSWORD]` maps the auth username to its password. On REGISTER the auth username must equal the To user; on INVITE the authenticated username *is* the caller identity (the From header is not compared — it carries vendor data such as the apartment number). `users.cfg` is a stub: credentials move to a database with the provisioning layer. Off: anyone may register any number — closed tests only. |
 | `TVX_ANTIFLOOD` | pike request-rate guard: more than 32 requests / 2 s from one IP are dropped. |
 
-`.env` holds `TVX_PUBLIC_IP` for docker compose, which passes it to rtpengine as
-`RTPENGINE_PUBLIC_IP`. **Both copies of `TVX_PUBLIC_IP` must be the same IP** —
-compose refuses to start when `.env` is missing. A `local.cfg` with
-neither `TVX_SIP_DOMAIN` nor `TVX_PUBLIC_IP` fails the config check with the
-token `NEITHER_TVX_SIP_DOMAIN_NOR_TVX_PUBLIC_IP_IS_DEFINED_IN_LOCAL_CFG`.
-
+A `local.cfg` with neither `TVX_SIP_DOMAIN` nor `TVX_PUBLIC_IP` fails the config
+check with the token `NEITHER_TVX_SIP_DOMAIN_NOR_TVX_PUBLIC_IP_IS_DEFINED_IN_LOCAL_CFG`.
 Non-secret tunables stay in `kamailio.cfg` itself: `TVX_RTP_FLAGS` (rtpengine
 per-leg flags, plain RTP/AVP with ICE stripped), `TVX_RTPENGINE_SOCK` and the
 tm timers (`fr_timer` 30 s, `fr_inv_timer` 120 s).
 
-`local.cfg`, `users.cfg` and `.env` are gitignored — keep them that way.
-
----
-
-## Run
+Config check against the image, before touching a running core:
 
 ```bash
-cd deployment
-# syntax/semantic check of local.cfg against the config inside the image, before touching the running core
-docker compose run --rm core -c -f /etc/kamailio/kamailio.cfg
-docker compose pull && docker compose up -d
-docker compose logs -f core | grep --line-buffered TVX   # routing decisions
+docker run --rm -v "$PWD/local.cfg:/etc/kamailio/local.cfg:ro" \
+  ghcr.io/beiroun/thundervox-core:0.7.0 -c -f /etc/kamailio/kamailio.cfg
 ```
 
 Every kamailio log line is prefixed with `{<1=request|2=reply> <CSeq> <Call-ID>}`,
 so one call can be followed with a single `grep <Call-ID>`.
 
-**Images.** The compose file runs the images this repository builds:
-`ghcr.io/beiroun/thundervox-core` (Kamailio 6.0.8 from source, `kamailio.cfg`
-inside, only `local.cfg` mounted) and `ghcr.io/beiroun/thundervox-rtpengine`
-(rtpengine mr26.2.1.2 from source). Both are built on `debian:trixie-slim`, run
-as non-root users, and carry the version of the git tag they were built from -
-the two always ship together. Nothing at runtime depends on third-party packages
-or images; the host keeps only this compose file, `.env` and `local.cfg`.
+**Images.** `ghcr.io/beiroun/thundervox-core` (Kamailio 6.0.8 from source,
+`kamailio.cfg` inside, only `local.cfg` mounted) and
+`ghcr.io/beiroun/thundervox-rtpengine` (rtpengine mr26.2.1.2 from source). Both
+are built on `debian:trixie-slim`, run as non-root users, and carry the version
+of the git tag they were built from — the two always ship together. Nothing at
+runtime depends on third-party packages or images.
 
 The rtpengine image takes its parameters from the environment
 (`TVX_PUBLIC_IP`, optional `TVX_LOCAL_IP` for 1:1 NAT hosts, `TVX_RTP_NG_PORT`,
@@ -164,7 +150,7 @@ The rtpengine image takes its parameters from the environment
 rtpengine flags; the ng control socket listens on `127.0.0.1` only, matching the
 core's `TVX_RTPENGINE_SOCK`.
 
-Building locally (not needed on the server - CI publishes the images):
+Building locally (not needed on the server — CI publishes the images):
 
 ```bash
 docker build -t thundervox-core:dev .
@@ -214,12 +200,12 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 - **Synchronous push.** `route[PUSH]` calls the gateway synchronously and can block
   a SIP worker for up to `connection_timeout` (2s). Production: async push-gateway
   microservice, fire-and-forget.
-- **Auth is a switch, off by default.** Without `TVX_AUTH` any host may register
-  any number — closed tests only. Calls are accepted only from registered
-  sources (`403` otherwise), which keeps fraud probes out but does not stop a
-  stranger from registering a number they do not own. Credentials live in a
-  config route (`users.cfg`) for now; the real subscriber store comes with the
-  provisioning layer (database + UI), TLS is v1.
+- **No authentication yet.** Any host may register any number — closed tests
+  only. Calls are accepted only from registered sources (`403` otherwise), which
+  keeps fraud probes out but does not stop a stranger from registering a number
+  they do not own. Digest authentication arrives with the provisioning layer
+  (`TVX_PROVISIONING`: `auth_db` against PostgreSQL, passwords issued by the
+  server) in v0.8; TLS is v1.
 - **One contact per AoR.** A second device registering the same number replaces
   the first. Multi-device users need parallel forking with per-branch rtpengine
   sessions (`via-branch` in a branch route) — v1.
@@ -238,11 +224,11 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 - **v0.6** — Docker Compose on a single host, upstream images.
   Stable calls between registered devices, caller identity by registration,
   push-wait as a switch.
-- **v0.6.1** — the same core on **own images built from source** (Kamailio
-  6.0.8, rtpengine mr26.2.1.2), published to GHCR by CI; the host keeps only
-  compose + config *(current)*.
-- **v0.7** — provisioning layer: `auth_db` against PostgreSQL (`TVX_PROVISIONING`
-  replaces `TVX_AUTH` / `users.cfg`), registrations persisted (`usrloc`
+- **v0.7** — the same core on **own images built from source** (Kamailio
+  6.0.8, rtpengine mr26.2.1.2), published to GHCR by CI; the deployment moves
+  to the umbrella repository, the host keeps only compose + config *(current)*.
+- **v0.8** — provisioning layer: digest authentication from PostgreSQL
+  (`TVX_PROVISIONING`, `auth_db`), registrations persisted (`usrloc`
   write-through), JSON-RPC for the server.
 - **v1** — Kubernetes: stateless Kamailio edge (HA), rtpengine media pool behind
   `dispatcher`, Redis-backed presence, async push service.

@@ -44,13 +44,11 @@ jobs:
           cache-to: type=gha,mode=max,scope=core
       - name: Config check before publishing
         run: |
-          cp deployment/configuration/local.cfg.example ci/local.cfg
-          sed 's/^##!define /#!define /' deployment/configuration/local.cfg.example > ci/local-all-switches.cfg
-          cp deployment/configuration/users.cfg.example ci/users.cfg
+          cp config/local.cfg.example ci/local.cfg
+          sed 's/^##!define /#!define /' config/local.cfg.example > ci/local-all-switches.cfg
           docker run --rm -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
             thundervox-core:release-check -c -f /etc/kamailio/kamailio.cfg
           docker run --rm -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
-            -v "$PWD/ci/users.cfg:/etc/kamailio/users.cfg:ro" \
             thundervox-core:release-check -c -f /etc/kamailio/kamailio.cfg
       - name: Push
         uses: docker/build-push-action@v7

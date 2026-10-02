@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: BUSL-1.1
-# Every push and pull request: build both images and check the configuration inside the core image.
+# Pushes to the release branch (and pull requests into it): build both images and check the configuration inside
+# the core image.
 # `kamailio -c` runs twice - with the example local.cfg (default switches) and with every switch on - so a
-# missing module or a typo in a switched-off branch fails here, not on the server. Nothing is pushed.
+# missing module or a typo in a switched-off branch fails here, not on the server. The template is taken from
+# the built image, the same file an operator gets on the server. Nothing is pushed.
 name: ci
 
 on:
   push:
-    branches: ["**"]
-    tags-ignore: ["v*"]
+    branches: ["release"]
   pull_request:
+    branches: ["release"]
 
 jobs:
   core:
@@ -28,10 +30,9 @@ jobs:
           cache-to: type=gha,mode=max,scope=core
       - name: Prepare config fixtures
         run: |
-          cp deployment/configuration/local.cfg.example ci/local.cfg
+          docker run --rm --entrypoint cat thundervox-core:ci /etc/kamailio/local.cfg.example > ci/local.cfg
           # every switch on: the ##!define lines of the example become #!define
-          sed 's/^##!define /#!define /' deployment/configuration/local.cfg.example > ci/local-all-switches.cfg
-          cp deployment/configuration/users.cfg.example ci/users.cfg
+          sed 's/^##!define /#!define /' config/local.cfg.example > ci/local-all-switches.cfg
       - name: Kamailio version
         run: docker run --rm thundervox-core:ci -v
       - name: Config check, default switches
@@ -39,11 +40,10 @@ jobs:
           docker run --rm \
             -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
             thundervox-core:ci -c -f /etc/kamailio/kamailio.cfg
-      - name: Config check, every switch on (tsilo, http_client, auth, pike)
+      - name: Config check, every switch on (tsilo, http_client, pike)
         run: |
           docker run --rm \
             -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
-            -v "$PWD/ci/users.cfg:/etc/kamailio/users.cfg:ro" \
             thundervox-core:ci -c -f /etc/kamailio/kamailio.cfg
       - name: Modules the provisioning layer needs are present
         run: |

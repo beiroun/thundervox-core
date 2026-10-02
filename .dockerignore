@@ -1,7 +1,6 @@
 # Secrets and site-local files must never enter an image
-deployment/.env
-deployment/configuration/local.cfg
-deployment/configuration/users.cfg
+config/local.cfg
+.env
 .git
 .github
 .idea
