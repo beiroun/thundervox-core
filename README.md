@@ -66,7 +66,7 @@ registered devices work exactly the same either way.
 | INFO / NOTIFY inside a dialog | relayed untouched (SIP INFO DTMF = door open; RFC2833 DTMF rides inside RTP) |
 | OPTIONS to the server | `200 OK` (device keepalives / availability probes) |
 | Failures and timeouts | 3xx–6xx and `408` release the media |
-| Transport | UDP and TCP on 5060, one advertised public address |
+| Transport | UDP and TCP on 5060, SIPS on 5061 with `TVX_TLS`; one advertised public address |
 | Caller identity | the calling device is the one registered from the source socket (ip:port → AoR, kept in an htable on REGISTER), never the From header — intercom firmwares put the apartment number there. An INVITE from a source that never registered gets `403 Caller Not Registered` |
 | Hygiene | scanner User-Agents dropped silently, retransmissions re-answered by tm, optional flood guard (`TVX_ANTIFLOOD`) |
 
@@ -77,8 +77,9 @@ registered devices work exactly the same either way.
 | Path | Role |
 |---|---|
 | `config/kamailio.cfg` | SIP signaling, registrar, NAT detection, push-wait routing |
-| `config/local.cfg.example` | Template for the site-local values (public IP, push URL, service token) and the feature switches; shipped inside the image at `/etc/kamailio/local.cfg.example` |
-| `Dockerfile` | Core image: Kamailio **6.0.8 built from source** (default module group + `db_postgres`, `http_client`), `kamailio.cfg` baked in, non-root |
+| `config/local.cfg.example` | Template for the site-local values (SIP domain, public IP, push URL, service token) and the feature switches; shipped inside the image at `/etc/kamailio/local.cfg.example` |
+| `config/tls.cfg.example` | Template for the TLS profiles read with `TVX_TLS` (certificate and key paths, TLS method); shipped inside the image at `/etc/kamailio/tls.cfg.example` |
+| `Dockerfile` | Core image: Kamailio **6.0.8 built from source** (default module group + `db_postgres`, `http_client`, `tls`), `kamailio.cfg` baked in, non-root with a pinned uid 1001 (so it can read the certificate the edge proxy obtained) |
 | `rtpengine/Dockerfile`, `rtpengine/entrypoint.sh` | Media image: rtpengine **mr26.2.1.2 built from source**, userspace forwarding, every parameter an explicit flag from `TVX_*` environment |
 | `docker/runtime-deps.sh` | Build helper: derives the runtime Debian packages from what the binaries actually link against |
 | `.github/workflows/` | `ci.yml` builds both images and runs `kamailio -c` on every push to `release`; `release.yml` publishes `ghcr.io/beiroun/thundervox-core` and `…/thundervox-rtpengine` on a `vX.Y.Z` tag |
@@ -114,12 +115,18 @@ docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.7.0 /etc/kama
 | `TVX_PUSH_URL` | Push gateway HTTP endpoint (used only with `TVX_PUSH_WAIT`). |
 | `TVX_PUSH_TOKEN` | Service token sent as `X-SERVICE-TOKEN`; must equal `SERVICE_TV_SIP_TOKEN` on the backend. |
 
+With `TVX_TLS` a second file, `tls.cfg`, is mounted next to `local.cfg` (template
+`/etc/kamailio/tls.cfg.example` in the image). It names the certificate and the
+key, which the deployment's edge proxy obtains and renews; `kamcmd tls.reload`
+re-reads it, so a renewal needs no restart and keeps the registrations.
+
 Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
 
 | Switch | Effect |
 |---|---|
 | `TVX_PUSH_WAIT` | Park INVITEs for offline callees and wake the device by push. Off: offline callee gets `480`. |
 | `TVX_ANTIFLOOD` | pike request-rate guard: more than 32 requests / 2 s from one IP are dropped. |
+| `TVX_TLS` | Accept SIPS on 5061 as well (plain 5060 stays open). Needs `TVX_SIP_DOMAIN` — a certificate is issued for a name, never for an IP — and a filled-in `tls.cfg`. Without the domain the config check fails with the token `TVX_TLS_NEEDS_TVX_SIP_DOMAIN_A_CERTIFICATE_IS_ISSUED_FOR_A_NAME_NOT_AN_IP`. |
 
 A `local.cfg` with neither `TVX_SIP_DOMAIN` nor `TVX_PUBLIC_IP` fails the config
 check with the token `NEITHER_TVX_SIP_DOMAIN_NOR_TVX_PUBLIC_IP_IS_DEFINED_IN_LOCAL_CFG`.
@@ -172,6 +179,7 @@ docker exec thundervox-core kamcmd -s unix:/tmp/kamailio_ctl rtpengine.show all
 | Port | Proto | Purpose |
 |---|---|---|
 | 5060 | UDP + TCP | SIP signaling |
+| 5061 | TCP | SIP over TLS (SIPS), only with `TVX_TLS` |
 | 29000–30000 | UDP | RTP/RTCP media (rtpengine range; narrow test pool, widen for production) |
 
 ---
@@ -205,7 +213,9 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
   keeps fraud probes out but does not stop a stranger from registering a number
   they do not own. Digest authentication arrives with the provisioning layer
   (`TVX_PROVISIONING`: `auth_db` against PostgreSQL, passwords issued by the
-  server) in v0.8; TLS is v1.
+  server) in v0.8. Transport encryption is available now (`TVX_TLS`), but it
+  protects the channel, not the identity: without digest auth a stranger can
+  still register over TLS.
 - **One contact per AoR.** A second device registering the same number replaces
   the first. Multi-device users need parallel forking with per-branch rtpengine
   sessions (`via-branch` in a branch route) — v1.

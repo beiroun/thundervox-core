@@ -8,8 +8,9 @@
 #
 # Module set: Kamailio's default group (every module without external dependencies: tm, sl, rr, usrloc,
 # registrar, auth, auth_db, htable, dialog, nathelper, rtpengine, tsilo, pike, xhttp, jsonrpcs, ctl, ...)
-# plus the two that need libraries: db_postgres (libpq, the provisioning layer) and http_client (libcurl,
-# the push gateway). Build and install follow the INSTALL file of the Kamailio source tree:
+# plus the three that need libraries: db_postgres (libpq, the provisioning layer), http_client (libcurl,
+# the push gateway) and tls (openssl, SIPS on 5061 - group mod_list_tlsdeps, never part of the default group).
+# Build and install follow the INSTALL file of the Kamailio source tree:
 #   make cfg include_modules="..." -> make all -> make install   (prefix /usr/local, modules in lib64/)
 
 ARG KAMAILIO_VERSION=6.0.8
@@ -20,14 +21,14 @@ ARG KAMAILIO_VERSION
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential bison flex make pkgconf git ca-certificates \
-      libpq-dev libcurl4-openssl-dev libreadline-dev libncurses-dev \
+      libpq-dev libcurl4-openssl-dev libssl-dev libreadline-dev libncurses-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src
 RUN git clone --depth 1 --branch "${KAMAILIO_VERSION}" https://github.com/kamailio/kamailio.git
 
 WORKDIR /usr/src/kamailio
-RUN make cfg include_modules="db_postgres http_client" \
+RUN make cfg include_modules="db_postgres http_client tls" \
  && make -j"$(nproc)" all \
  && make install
 
@@ -54,19 +55,22 @@ RUN apt-get update \
 # Binaries, modules, kamcmd/kamctl and the stock share/ files (SQL schemas of kamctl are handy for reference)
 COPY --from=build /usr/local/ /usr/local/
 
-RUN groupadd --system kamailio \
- && useradd --system --gid kamailio --no-create-home --shell /usr/sbin/nologin kamailio \
+# The uid is pinned on purpose: with TVX_TLS the core reads the certificate the edge proxy obtained, and
+# CertMagic hard-codes 0600 on private keys - only the same uid can read them, a shared group cannot. The
+# deployment runs the edge container as this uid (see docker-compose.yml in the umbrella repository).
+RUN groupadd --gid 1001 kamailio \
+ && useradd --uid 1001 --gid 1001 --no-create-home --shell /usr/sbin/nologin kamailio \
  && mkdir -p /etc/kamailio /run/kamailio \
  && chown kamailio:kamailio /run/kamailio
 
 # The ThunderVox routing logic lives in the image; it pulls /etc/kamailio/local.cfg (mounted) for site values.
 # The template of that file ships with the image too, so the deployment needs no copy of it:
 #   docker run --rm --entrypoint cat <image> /etc/kamailio/local.cfg.example > local.cfg
-COPY config/kamailio.cfg config/local.cfg.example /etc/kamailio/
+COPY config/kamailio.cfg config/local.cfg.example config/tls.cfg.example /etc/kamailio/
 
 USER kamailio
-# Host-networked in the compose deployment; informational
-EXPOSE 5060/udp 5060/tcp
+# Host-networked in the compose deployment; informational (5061 only with TVX_TLS)
+EXPOSE 5060/udp 5060/tcp 5061/tcp
 
 ENTRYPOINT ["kamailio"]
 # -DD: stay in the foreground (container), -E: log to stderr (kamailio.cfg sets log_stderror=yes as well)

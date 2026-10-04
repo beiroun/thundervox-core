@@ -3,7 +3,8 @@
 # the core image.
 # `kamailio -c` runs twice - with the example local.cfg (default switches) and with every switch on - so a
 # missing module or a typo in a switched-off branch fails here, not on the server. The template is taken from
-# the built image, the same file an operator gets on the server. Nothing is pushed.
+# the built image, the same file an operator gets on the server. The every-switch run includes TVX_TLS, so it
+# gets a throwaway self-signed certificate and a tls.cfg pointing at it. Nothing is pushed.
 name: ci
 
 on:
@@ -33,6 +34,18 @@ jobs:
           docker run --rm --entrypoint cat thundervox-core:ci /etc/kamailio/local.cfg.example > ci/local.cfg
           # every switch on: the ##!define lines of the example become #!define
           sed 's/^##!define /#!define /' config/local.cfg.example > ci/local-all-switches.cfg
+          # TVX_TLS needs a readable certificate pair; a throwaway self-signed one proves the config loads.
+          # World-readable on purpose: the container runs as uid 1001, which is not the runner's user.
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=sip.example.com' \
+            -keyout ci/tls.key -out ci/tls.crt
+          chmod 644 ci/tls.key ci/tls.crt
+          printf '%s\n' \
+            '[server:default]' \
+            'method = TLSv1.2+' \
+            'certificate = /etc/kamailio/ci-tls.crt' \
+            'private_key = /etc/kamailio/ci-tls.key' \
+            'verify_certificate = no' \
+            'require_certificate = no' > ci/tls.cfg
       - name: Kamailio version
         run: docker run --rm thundervox-core:ci -v
       - name: Config check, default switches
@@ -40,15 +53,18 @@ jobs:
           docker run --rm \
             -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
             thundervox-core:ci -c -f /etc/kamailio/kamailio.cfg
-      - name: Config check, every switch on (tsilo, http_client, pike)
+      - name: Config check, every switch on (tsilo, http_client, pike, tls)
         run: |
           docker run --rm \
             -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
+            -v "$PWD/ci/tls.cfg:/etc/kamailio/tls.cfg:ro" \
+            -v "$PWD/ci/tls.crt:/etc/kamailio/ci-tls.crt:ro" \
+            -v "$PWD/ci/tls.key:/etc/kamailio/ci-tls.key:ro" \
             thundervox-core:ci -c -f /etc/kamailio/kamailio.cfg
       - name: Modules the provisioning layer needs are present
         run: |
           docker run --rm --entrypoint sh thundervox-core:ci -c \
-            'for m in db_postgres auth_db xhttp jsonrpcs http_client tsilo htable dialog pike rtpengine; do \
+            'for m in db_postgres auth_db xhttp jsonrpcs http_client tsilo htable dialog pike rtpengine tls; do \
                ls /usr/local/lib*/kamailio/modules/$m.so; done'
 
   rtpengine:
