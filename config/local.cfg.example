@@ -29,8 +29,21 @@
 # expects (SERVICE_TV_SIP_TOKEN in the backend environment).
 #!substdef "!TVX_PUSH_TOKEN!replace-with-real-token!g"
 
+# Provisioning database: the tvx_sip role the server's migration V3 creates, its
+# password = TVX_SIP_DB_PASSWORD of the deployment .env. Only used with
+# TVX_PROVISIONING. No '!' in the password - it delimits this substdef.
+#!substdef "!TVX_DB_URL!postgres://tvx_sip:replace-with-tvx-sip-password@127.0.0.1:5432/thundervox!g"
+
 
 # ---- Switches: uncomment to enable. Everything below is OFF when absent. ----
+
+# Accounts and registrations from the provisioning server: digest auth of
+# REGISTER and INVITE against its database (passwords issued in the console),
+# registrations stored there too. Requires TVX_SIP_DOMAIN (the digest realm -
+# must equal TVX_SIP_HOST of the .env the server hashes with) and TVX_DB_URL.
+# Switch it on only after every device got its password in the console: from
+# that moment a device without one can neither register nor call.
+##!define TVX_PROVISIONING
 
 # Park INVITEs for offline callees and wake the device by push (tsilo +
 # http_client). Without it an offline callee gets "480 Temporarily Unavailable"

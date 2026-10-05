@@ -53,7 +53,7 @@ jobs:
           docker run --rm \
             -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
             thundervox-core:ci -c -f /etc/kamailio/kamailio.cfg
-      - name: Config check, every switch on (tsilo, http_client, pike, tls)
+      - name: Config check, every switch on (provisioning, tsilo, http_client, pike, tls)
         run: |
           docker run --rm \
             -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
@@ -64,7 +64,7 @@ jobs:
       - name: Modules the provisioning layer needs are present
         run: |
           docker run --rm --entrypoint sh thundervox-core:ci -c \
-            'for m in db_postgres auth_db xhttp jsonrpcs http_client tsilo htable dialog pike rtpengine tls; do \
+            'for m in db_postgres auth auth_db xhttp jsonrpcs http_client tsilo htable dialog pike rtpengine tls; do \
                ls /usr/local/lib*/kamailio/modules/$m.so; done'
 
   rtpengine:

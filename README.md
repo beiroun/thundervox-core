@@ -67,7 +67,8 @@ registered devices work exactly the same either way.
 | OPTIONS to the server | `200 OK` (device keepalives / availability probes) |
 | Failures and timeouts | 3xx–6xx and `408` release the media |
 | Transport | UDP and TCP on 5060, SIPS on 5061 with `TVX_TLS`; one advertised public address |
-| Caller identity | the calling device is the one registered from the source socket (ip:port → AoR, kept in an htable on REGISTER), never the From header — intercom firmwares put the apartment number there. An INVITE from a source that never registered gets `403 Caller Not Registered` |
+| Authentication | with `TVX_PROVISIONING`: digest auth of REGISTER (`401`) and INVITE (`407`) against the accounts the provisioning server keeps in PostgreSQL (HA1 only, realm = `TVX_SIP_DOMAIN`); a number registers only itself (`403` otherwise); a blocked or deleted number fails at once. Without it the core is open (closed tests only) |
+| Caller identity | never the From header — intercom firmwares put the apartment number there. With `TVX_PROVISIONING` the caller is the authenticated number; without it, the device registered from the source socket (ip:port → AoR, kept in an htable on REGISTER). An INVITE from a source that is not registered gets `403 Caller Not Registered` |
 | Hygiene | scanner User-Agents dropped silently, retransmissions re-answered by tm, optional flood guard (`TVX_ANTIFLOOD`) |
 
 ---
@@ -103,7 +104,7 @@ mounted into the core container at `/etc/kamailio/local.cfg`; `config/` in
 this repository is what the image bakes in, not a deployment:
 
 ```bash
-docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.7.0 /etc/kamailio/local.cfg.example > local.cfg
+docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.10.0 /etc/kamailio/local.cfg.example > local.cfg
 ```
 
 `local.cfg` is pulled into `kamailio.cfg` by `include_file` and defines:
@@ -114,6 +115,7 @@ docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.7.0 /etc/kama
 | `TVX_PUBLIC_IP` | Server public IP. Advertised instead of the domain when `TVX_SIP_DOMAIN` is absent; otherwise only accepted as "myself" for devices that dial by raw IP. Must equal the address rtpengine advertises (`TVX_PUBLIC_IP` in the deployment `.env`). **At least one of the two must be set.** |
 | `TVX_PUSH_URL` | Push gateway HTTP endpoint (used only with `TVX_PUSH_WAIT`). |
 | `TVX_PUSH_TOKEN` | Service token sent as `X-SERVICE-TOKEN`; must equal `SERVICE_TV_SIP_TOKEN` on the backend. |
+| `TVX_DB_URL` | `postgres://tvx_sip:<password>@127.0.0.1:5432/thundervox` — the provisioning database, role `tvx_sip` (created by the server's migration, password = `TVX_SIP_DB_PASSWORD` of the deployment `.env`). Used only with `TVX_PROVISIONING`. |
 
 With `TVX_TLS` a second file, `tls.cfg`, is mounted next to `local.cfg` (template
 `/etc/kamailio/tls.cfg.example` in the image). It names the certificate and the
@@ -124,6 +126,7 @@ Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
 
 | Switch | Effect |
 |---|---|
+| `TVX_PROVISIONING` | Accounts and registrations from the provisioning server: `auth_db` checks REGISTER and INVITE against its `subscriber` table, `usrloc` writes registrations through to its `location` table (they survive a restart, the console shows who is online). Needs `TVX_SIP_DOMAIN` (the digest realm — it must equal the realm the server hashes with, `TVX_SIP_HOST` of the `.env`) and `TVX_DB_URL`; without them the config check fails with `TVX_PROVISIONING_NEEDS_…` tokens. Switch it on only after every device got its password. |
 | `TVX_PUSH_WAIT` | Park INVITEs for offline callees and wake the device by push. Off: offline callee gets `480`. |
 | `TVX_ANTIFLOOD` | pike request-rate guard: more than 32 requests / 2 s from one IP are dropped. |
 | `TVX_TLS` | Accept SIPS on 5061 as well (plain 5060 stays open). Needs `TVX_SIP_DOMAIN` — a certificate is issued for a name, never for an IP — and a filled-in `tls.cfg`. Without the domain the config check fails with the token `TVX_TLS_NEEDS_TVX_SIP_DOMAIN_A_CERTIFICATE_IS_ISSUED_FOR_A_NAME_NOT_AN_IP`. |
@@ -138,7 +141,7 @@ Config check against the image, before touching a running core:
 
 ```bash
 docker run --rm -v "$PWD/local.cfg:/etc/kamailio/local.cfg:ro" \
-  ghcr.io/beiroun/thundervox-core:0.7.0 -c -f /etc/kamailio/kamailio.cfg
+  ghcr.io/beiroun/thundervox-core:0.10.0 -c -f /etc/kamailio/kamailio.cfg
 ```
 
 Every kamailio log line is prefixed with `{<1=request|2=reply> <CSeq> <Call-ID>}`,
@@ -208,19 +211,20 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 - **Synchronous push.** `route[PUSH]` calls the gateway synchronously and can block
   a SIP worker for up to `connection_timeout` (2s). Production: async push-gateway
   microservice, fire-and-forget.
-- **No authentication yet.** Any host may register any number — closed tests
-  only. Calls are accepted only from registered sources (`403` otherwise), which
-  keeps fraud probes out but does not stop a stranger from registering a number
-  they do not own. Digest authentication arrives with the provisioning layer
-  (`TVX_PROVISIONING`: `auth_db` against PostgreSQL, passwords issued by the
-  server) in v0.8. Transport encryption is available now (`TVX_TLS`), but it
-  protects the channel, not the identity: without digest auth a stranger can
-  still register over TLS.
+- **Open without `TVX_PROVISIONING`.** With the switch off any host may register
+  any number — closed tests only (calls are still accepted only from registered
+  sources). `TVX_TLS` protects the channel, not the identity.
+- **Blocking does not evict.** A number blocked or deleted in the console fails
+  authentication at once, but its current registration stays until it expires
+  (it can still be called meanwhile). Eviction over the core's RPC is a next step.
+- **The database is on the SIP path.** With `TVX_PROVISIONING` every REGISTER
+  and INVITE reads PostgreSQL; a database outage locks every device out
+  (logged as `auth ERROR rc=-1`).
 - **One contact per AoR.** A second device registering the same number replaces
   the first. Multi-device users need parallel forking with per-branch rtpengine
   sessions (`via-branch` in a branch route) — v1.
-- **No persistence.** `usrloc` and `dialog` are in-memory; registrations and
-  call state are lost on restart. Add DB-mode + Redis for HA.
+- **Calls are not persisted.** `dialog` is in-memory: live calls are lost on a
+  restart (registrations survive with `TVX_PROVISIONING`).
 - **Single node.** One Kamailio + one rtpengine. Horizontal scale (dispatcher to a
   media pool, HA registrar) is the v1 target.
 - **Dead contacts are discovered late.** A NATed device that vanished without
@@ -236,10 +240,12 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
   push-wait as a switch.
 - **v0.7** — the same core on **own images built from source** (Kamailio
   6.0.8, rtpengine mr26.2.1.2), published to GHCR by CI; the deployment moves
-  to the umbrella repository, the host keeps only compose + config *(current)*.
-- **v0.8** — provisioning layer: digest authentication from PostgreSQL
+  to the umbrella repository, the host keeps only compose + config.
+- **v0.9** — SIP over TLS (`TVX_TLS`) with the certificate of the edge proxy.
+- **v0.10** — provisioning: digest authentication from PostgreSQL
   (`TVX_PROVISIONING`, `auth_db`), registrations persisted (`usrloc`
-  write-through), JSON-RPC for the server.
+  write-through) *(current)*. Next: JSON-RPC for the server (evict a
+  registration, end a call).
 - **v1** — Kubernetes: stateless Kamailio edge (HA), rtpengine media pool behind
   `dispatcher`, Redis-backed presence, async push service.
 
