@@ -2,7 +2,8 @@
 # Tag vX.Y.Z -> ghcr.io/beiroun/thundervox-core:X.Y.Z and ghcr.io/beiroun/thundervox-rtpengine:X.Y.Z.
 # The two images share the repository's version: the core config and the media relay it was tested with ship
 # together. "latest" is never published; the deployment compose pins exact versions.
-# The core image is config-checked before it is pushed.
+# The core image is config-checked before it is pushed, with the same fixtures as ci.yml (TVX_TLS needs a
+# certificate pair to load). rtpengine waits for the core job, so a failed check never publishes half a release.
 name: release
 
 on:
@@ -42,13 +43,33 @@ jobs:
           tags: thundervox-core:release-check
           cache-from: type=gha,scope=core
           cache-to: type=gha,mode=max,scope=core
+      - name: Prepare config fixtures
+        run: |
+          docker run --rm --entrypoint cat thundervox-core:release-check /etc/kamailio/local.cfg.example > ci/local.cfg
+          # every switch on: the ##!define lines of the example become #!define
+          sed 's/^##!define /#!define /' config/local.cfg.example > ci/local-all-switches.cfg
+          # TVX_TLS needs a readable certificate pair; a throwaway self-signed one proves the config loads.
+          # World-readable on purpose: the container runs as uid 1001, which is not the runner's user.
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=sip.example.com' \
+            -keyout ci/tls.key -out ci/tls.crt
+          chmod 644 ci/tls.key ci/tls.crt
+          printf '%s\n' \
+            '[server:default]' \
+            'method = TLSv1.2+' \
+            'certificate = /etc/kamailio/ci-tls.crt' \
+            'private_key = /etc/kamailio/ci-tls.key' \
+            'verify_certificate = no' \
+            'require_certificate = no' > ci/tls.cfg
       - name: Config check before publishing
         run: |
-          cp config/local.cfg.example ci/local.cfg
-          sed 's/^##!define /#!define /' config/local.cfg.example > ci/local-all-switches.cfg
-          docker run --rm -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
+          docker run --rm \
+            -v "$PWD/ci/local.cfg:/etc/kamailio/local.cfg:ro" \
             thundervox-core:release-check -c -f /etc/kamailio/kamailio.cfg
-          docker run --rm -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
+          docker run --rm \
+            -v "$PWD/ci/local-all-switches.cfg:/etc/kamailio/local.cfg:ro" \
+            -v "$PWD/ci/tls.cfg:/etc/kamailio/tls.cfg:ro" \
+            -v "$PWD/ci/tls.crt:/etc/kamailio/ci-tls.crt:ro" \
+            -v "$PWD/ci/tls.key:/etc/kamailio/ci-tls.key:ro" \
             thundervox-core:release-check -c -f /etc/kamailio/kamailio.cfg
       - name: Push
         uses: docker/build-push-action@v7
@@ -62,6 +83,7 @@ jobs:
           cache-from: type=gha,scope=core
 
   rtpengine:
+    needs: core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
