@@ -48,7 +48,7 @@ steps 3–6 are skipped and the INVITE is relayed immediately.
 
 Push-wait is a **switch** (`TVX_PUSH_WAIT` in `local.cfg`), off by default:
 without it an offline callee gets `480 Temporarily Unavailable` at once. That is
-the right mode while the push gateway is not deployed — plain calls between
+the right mode while no push gateway is configured on the console's Integration page — plain calls between
 registered devices work exactly the same either way.
 
 ### What the core handles
@@ -84,7 +84,7 @@ registered devices work exactly the same either way.
 | `rtpengine/Dockerfile`, `rtpengine/entrypoint.sh` | Media image: rtpengine **mr26.2.1.2 built from source**, userspace forwarding, every parameter an explicit flag from `TVX_*` environment |
 | `docker/runtime-deps.sh` | Build helper: derives the runtime Debian packages from what the binaries actually link against |
 | `.github/workflows/` | `ci.yml` builds both images and runs `kamailio -c` on every push to `release`; `release.yml` publishes `ghcr.io/beiroun/thundervox-core` and `…/thundervox-rtpengine` on a `vX.Y.Z` tag |
-| *(external)* push gateway | HTTP endpoint that delivers APNs/FCM pushes — **not** in this repo |
+| *(external)* provisioning server | `thundervox-server`: the core asks it on loopback to wake a sleeping callee; the server delivers the push to the operator's backend configured on the console's Integration page — **not** in this repo |
 
 **NAT strategy:** the *received* method for registered devices
 (`fix_nated_register` + `received_avp`) and the *alias* method for the other
@@ -113,8 +113,8 @@ docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.10.0 /etc/kam
 |---|---|
 | `TVX_SIP_DOMAIN` | DNS name of the server (preferred). Devices register to it and dial through it; when set, the core advertises it in Via/Record-Route and treats it as its own domain. |
 | `TVX_PUBLIC_IP` | Server public IP. Advertised instead of the domain when `TVX_SIP_DOMAIN` is absent; otherwise only accepted as "myself" for devices that dial by raw IP. Must equal the address rtpengine advertises (`TVX_PUBLIC_IP` in the deployment `.env`). **At least one of the two must be set.** |
-| `TVX_PUSH_URL` | Push gateway HTTP endpoint (used only with `TVX_PUSH_WAIT`). |
-| `TVX_PUSH_TOKEN` | Service token sent as `X-SERVICE-TOKEN`; must equal `SERVICE_TV_SIP_TOKEN` on the backend. |
+| `TVX_CORE_TOKEN` | Token sent as `X-CORE-TOKEN` to the provisioning server's internal API; must equal `TVX_CORE_TOKEN` in the deployment `.env` (used only with `TVX_PUSH_WAIT`). |
+| `TVX_SERVER_URL` | Base URL of the provisioning server's API, default `http://127.0.0.1:8080/api/v1` (used only with `TVX_PUSH_WAIT`). |
 | `TVX_DB_URL` | `postgres://tvx_sip:<password>@127.0.0.1:5432/thundervox` — the provisioning database, role `tvx_sip` (created by the server's migration, password = `TVX_SIP_DB_PASSWORD` of the deployment `.env`). Used only with `TVX_PROVISIONING`. |
 
 With `TVX_TLS` a second file, `tls.cfg`, is mounted next to `local.cfg` (template
@@ -127,7 +127,7 @@ Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
 | Switch | Effect |
 |---|---|
 | `TVX_PROVISIONING` | Accounts and registrations from the provisioning server: `auth_db` checks REGISTER and INVITE against its `subscriber` table, `usrloc` writes registrations through to its `location` table (they survive a restart, the console shows who is online). Needs `TVX_SIP_DOMAIN` (the digest realm — it must equal the realm the server hashes with, `TVX_SIP_HOST` of the `.env`) and `TVX_DB_URL`; without them the config check fails with `TVX_PROVISIONING_NEEDS_…` tokens. Switch it on only after every device got its password. |
-| `TVX_PUSH_WAIT` | Park INVITEs for offline callees and wake the device by push. Off: offline callee gets `480`. |
+| `TVX_PUSH_WAIT` | Park INVITEs for offline callees and ask the provisioning server to wake the device (it delivers the push to the operator's backend). Off: offline callee gets `480`. |
 | `TVX_ANTIFLOOD` | pike request-rate guard: more than 32 requests / 2 s from one IP are dropped. |
 | `TVX_TLS` | Accept SIPS on 5061 as well (plain 5060 stays open). Needs `TVX_SIP_DOMAIN` — a certificate is issued for a name, never for an IP — and a filled-in `tls.cfg`. Without the domain the config check fails with the token `TVX_TLS_NEEDS_TVX_SIP_DOMAIN_A_CERTIFICATE_IS_ISSUED_FOR_A_NAME_NOT_AN_IP`. |
 
@@ -208,9 +208,10 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 
 ## Known limitations / TODO
 
-- **Synchronous push.** `route[PUSH]` calls the gateway synchronously and can block
-  a SIP worker for up to `connection_timeout` (2s). Production: async push-gateway
-  microservice, fire-and-forget.
+- **Synchronous wake request.** `route[PUSH]` calls the provisioning server
+  synchronously; the server answers on loopback before any network work and
+  delivers the push to the operator's backend itself, so the worst case is the
+  server being down (`connection_timeout`, 2s), not a slow operator backend.
 - **Open without `TVX_PROVISIONING`.** With the switch off any host may register
   any number — closed tests only (calls are still accepted only from registered
   sources). `TVX_TLS` protects the channel, not the identity.

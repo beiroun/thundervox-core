@@ -21,13 +21,15 @@
 # Keep it equal to TVX_PUBLIC_IP in the deployment .env (thundervox/deploy/.env, which feeds rtpengine).
 #!substdef "!TVX_PUBLIC_IP!203.0.113.10!g"
 
-# Push gateway: HTTP endpoint that delivers APNs/FCM pushes to wake the device.
-# Only used when TVX_PUSH_WAIT is defined below.
-#!substdef "!TVX_PUSH_URL!http://push.example.com/api/tv-sip/test!g"
+# Token the provisioning server expects from the core on its internal API
+# (X-CORE-TOKEN): the same value as TVX_CORE_TOKEN in the deployment .env. Only
+# used with TVX_PUSH_WAIT. The push gateway itself (URL, auth header) is set on
+# the console's Integration page, not here.
+#!substdef "!TVX_CORE_TOKEN!replace-with-the-core-token-of-dot-env!g"
 
-# Service token sent as X-SERVICE-TOKEN. MUST equal the token the push gateway
-# expects (SERVICE_TV_SIP_TOKEN in the backend environment).
-#!substdef "!TVX_PUSH_TOKEN!replace-with-real-token!g"
+# Where the provisioning server listens. The default is the compose layout
+# (host network, loopback); uncomment only when the server runs elsewhere.
+##!substdef "!TVX_SERVER_URL!http://127.0.0.1:8080/api/v1!g"
 
 # Provisioning database: the tvx_sip role the server's migration V3 creates, its
 # password = TVX_SIP_DB_PASSWORD of the deployment .env. Only used with
@@ -45,9 +47,11 @@
 # that moment a device without one can neither register nor call.
 ##!define TVX_PROVISIONING
 
-# Park INVITEs for offline callees and wake the device by push (tsilo +
-# http_client). Without it an offline callee gets "480 Temporarily Unavailable"
-# immediately — the right mode while the push gateway is not deployed.
+# Park INVITEs for offline callees and ask the provisioning server to wake the
+# device (tsilo + http_client on loopback; the server delivers the push to the
+# operator's backend configured on the Integration page). Requires
+# TVX_CORE_TOKEN. Without it an offline callee gets "480 Temporarily
+# Unavailable" immediately - the right mode while no push gateway is set.
 ##!define TVX_PUSH_WAIT
 
 # Request-rate guard per source IP (pike): >32 requests / 2 s -> dropped.
