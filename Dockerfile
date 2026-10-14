@@ -47,9 +47,12 @@ LABEL org.opencontainers.image.title="ThunderVox Core" \
       io.thundervox.kamailio.version="${KAMAILIO_VERSION}"
 
 COPY --from=build /runtime-deps.txt /tmp/runtime-deps.txt
+# netbase is no library, so the ldd-derived list never names it - yet it owns /etc/protocols, which kamailio reads
+# at start (getprotobyname("tcp")); without it tcp_init() logs "could not get TCP protocol number" and leaves
+# Nagle on for every TCP connection (small SIP writes to the apps wait for the ACK of the previous one).
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      tzdata ca-certificates $(cat /tmp/runtime-deps.txt) \
+      tzdata ca-certificates netbase $(cat /tmp/runtime-deps.txt) \
  && rm -rf /var/lib/apt/lists/* /tmp/runtime-deps.txt
 
 # Binaries, modules, kamcmd/kamctl and the stock share/ files (SQL schemas of kamctl are handy for reference)
