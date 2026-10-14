@@ -45,9 +45,9 @@ jobs:
           cache-to: type=gha,mode=max,scope=core
       - name: Prepare config fixtures
         run: |
-          docker run --rm --entrypoint cat thundervox-core:release-check /etc/kamailio/local.cfg.example > ci/local.cfg
-          # every switch on: the ##!define lines of the example become #!define
-          sed 's/^##!define /#!define /' config/local.cfg.example > ci/local-all-switches.cfg
+          cp ci/fixture.cfg ci/local.cfg
+          # every switch on: the ##!define lines of the fixture become #!define
+          sed 's/^##!define /#!define /' ci/fixture.cfg > ci/local-all-switches.cfg
           # TVX_TLS needs a readable certificate pair; a throwaway self-signed one proves the config loads.
           # World-readable on purpose: the container runs as uid 1001, which is not the runner's user.
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=sip.example.com' \

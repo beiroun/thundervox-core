@@ -22,43 +22,58 @@ is normally *offline* when an endpoint calls it. ThunderVox bridges that gap by
 **parking** the call and **waking** the device with a push:
 
 ```
-Intercom (always registered)            ThunderVox               Mobile app (asleep)
-        │                                    │                            │
-        │ 1. INVITE sip:1001@tvx ───────────▶│                            │
-        │                                    │ 2. lookup(1001) → offline  │
-        │                                    │ 3. ts_store()  (park call) │
-        │◀──────── 180 Ringing ──────────────│                            │
-        │                                    │ 4. push (HTTP) ───────────▶│ wakes up
-        │                                    │                            │
-        │                                    │◀──── 5. REGISTER 1001 ─────│
-        │                                    │ 6. ts_append() → resume    │
-        │                                    │ 7. INVITE ────────────────▶│
-        │◀════════ 8. RTP/RTCP media via rtpengine ══════════════════════▶│
+Intercom (always registered)            ThunderVox                 Phones of the flat (asleep)
+        │                                    │                                  │
+        │ 1. INVITE sip:10000001@tvx ───────▶│                                  │
+        │                                    │ 2. app client → park (t_suspend) │
+        │◀──────── 180 Ringing ──────────────│                                  │
+        │                                    │ 3. wake request → server → push ▶│ phones wake up
+        │                                    │                                  │
+        │                                    │◀──── 4. REGISTER 10000001 ───────│ (each phone)
+        │                                    │ 5. t_continue → lookup → fork    │
+        │                                    │ 6. INVITE ──────────────────────▶│ (every phone rings)
+        │                                    │◀──── 7. 200 OK from one phone ───│ tm cancels the rest
+        │◀════════ 8. RTP/RTCP media via rtpengine ════════════════════════════▶│
 ```
 
-- **1–3** — the endpoint calls; the app is not in the location table, so the INVITE
-  transaction is **parked** (`tsilo` module), keyed by the callee AoR.
-- **4** — a push notification wakes the device.
-- **5–7** — the app REGISTERs; `tsilo` **resumes** the parked INVITE and routes it to
-  the freshly-registered contact.
+- **1–2** — the endpoint calls an app client (a `1…` number). The call is
+  **parked** at once: the INVITE transaction is suspended (`t_suspend`, tm/tmx)
+  and remembered by the callee number. Whatever the location table says about
+  the number is ignored — a registration an app left behind says nothing about
+  the phone being awake (iOS keeps it until it expires, even after a hang-up from
+  the lock screen), and every app registers again when the push arrives.
+- **3** — the provisioning server is asked to wake the phones; it delivers the
+  push to the operator's backend (console → Integration page).
+- **4–6** — each phone of the flat REGISTERs; a **new** binding (new Call-ID)
+  resumes the parked INVITE (`t_continue`) and forks it to **every** contact of
+  the number, one rtpengine session per branch. A refresh of an existing
+  registration does not ring the phone a second time.
+- **7** — the first `200 OK` wins; tm cancels the other phones.
 - **8** — `rtpengine` relays and NAT-fixes the audio/video for both legs.
 
-If the callee is **already registered** (e.g. a Zoiper softphone during testing),
-steps 3–6 are skipped and the INVITE is relayed immediately.
+The call stays parked for the **wake window** (`TVX_WAKE_WINDOW`, 90 s): a
+decline of one phone (iOS answers `603` when it restarts its SIP stack
+mid-ring), a dead branch or a phone that is slow to come up do not end it —
+only an answer, the caller's `CANCEL` or the window itself do (`480`). While a
+flat is being woken, a second call to the same number hears `486 Busy Here`.
 
-Push-wait is a **switch** (`TVX_PUSH_WAIT` in `local.cfg`), off by default:
-without it an offline callee gets `480 Temporarily Unavailable` at once. That is
-the right mode while no push gateway is configured on the console's Integration page — plain calls between
-registered devices work exactly the same either way.
+Push-first is a **switch** (`TVX_PUSH_WAIT` in `local.cfg`), off by default:
+without it the core simply rings whoever is registered (all contacts in
+parallel) and answers `480 Temporarily Unavailable` to a call for an
+unregistered number. That is the right mode while no push gateway is configured
+on the console's Integration page — plain calls between registered devices
+(Zoiper, panels) work exactly the same either way.
 
 ### What the core handles
 
 | Case | Behaviour |
 |---|---|
-| REGISTER / unregister | one contact per AoR (latest registration wins), NAT-safe (`received`), keepalive pings for NATed contacts, `Expires` clamped to 60–3600 s |
-| INVITE, callee online | SDP anchored on rtpengine (audio + video), relayed to the registered contact |
-| INVITE, callee offline | `480` — or park + push with `TVX_PUSH_WAIT` |
-| CANCEL | media released, branch cancelled, `487` to the caller |
+| REGISTER / unregister | several contacts per AoR (the owner's phone, the family's phones, a watch), NAT-safe (`received`), keepalive pings for NATed contacts, `Expires` clamped to 60–3600 s; a TCP/TLS contact leaves the table the moment its connection dies (`handle_lost_tcp` + TCP keepalive) — "online" means reachable |
+| INVITE, callee online | parallel fork to every registered contact, one rtpengine session per branch (audio + video); the first `200 OK` wins, tm cancels the rest |
+| INVITE, app client (`1…`) with `TVX_PUSH_WAIT` | always park + push; the devices that register after the push are rung; wake window 90 s, `486` for a second caller meanwhile |
+| INVITE, callee offline | `480` |
+| Call events | `started` / `answered` / `ended` posted to the provisioning server (`/internal/call-events`) whenever `TVX_CORE_TOKEN` is set — its call log and dashboard |
+| CANCEL | media released, branches cancelled (a parked call too), `487` to the caller |
 | BYE (either side) | media released, relayed |
 | re-INVITE (hold / resume / codec or video change) | re-offer + re-answer; a rejected re-INVITE keeps the live media |
 | ACK | plain 2xx ACK, late-offer ACK with SDP (answer), negative-reply ACK |
@@ -78,8 +93,9 @@ registered devices work exactly the same either way.
 | Path | Role |
 |---|---|
 | `config/kamailio.cfg` | SIP signaling, registrar, NAT detection, push-wait routing |
-| `config/local.cfg.example` | Template for the site-local values (SIP domain, public IP, push URL, service token) and the feature switches; shipped inside the image at `/etc/kamailio/local.cfg.example` |
-| `config/tls.cfg.example` | Template for the TLS profiles read with `TVX_TLS` (certificate and key paths, TLS method); shipped inside the image at `/etc/kamailio/tls.cfg.example` |
+| *(umbrella)* `thundervox/deploy/local.cfg.example` | Template for the site-local values (SIP domain, public IP, server token) and the feature switches - next to the live `local.cfg` it is copied to |
+| *(umbrella)* `thundervox/deploy/tls.cfg.example` | Template for the TLS profiles read with `TVX_TLS` (certificate and key paths, TLS method) |
+| `ci/fixture.cfg` | Fake `local.cfg` for the config check in CI (`kamailio -c` with the switches off and on); not a template |
 | `Dockerfile` | Core image: Kamailio **6.0.8 built from source** (default module group + `db_postgres`, `http_client`, `tls`), `kamailio.cfg` baked in, non-root with a pinned uid 1001 (so it can read the certificate the edge proxy obtained) |
 | `rtpengine/Dockerfile`, `rtpengine/entrypoint.sh` | Media image: rtpengine **mr26.2.1.2 built from source**, userspace forwarding, every parameter an explicit flag from `TVX_*` environment |
 | `docker/runtime-deps.sh` | Build helper: derives the runtime Debian packages from what the binaries actually link against |
@@ -99,13 +115,10 @@ The core is **deployed from the umbrella repository**
 [`thundervox`](https://github.com/beiroun/thundervox) (`deploy/docker-compose.yml`,
 `.env`, `local.cfg`, runbook) — this repository only builds the images and holds
 the configuration they bake in. Site-local values are not committed anywhere:
-`local.cfg` is created from the template that ships inside the image and
-mounted into the core container at `/etc/kamailio/local.cfg`; `config/` in
-this repository is what the image bakes in, not a deployment:
-
-```bash
-docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.10.0 /etc/kamailio/local.cfg.example > local.cfg
-```
+`local.cfg` is created from `deploy/local.cfg.example` of the umbrella
+repository (template and live file side by side in the deployment directory)
+and mounted into the core container at `/etc/kamailio/local.cfg`; `config/` in
+this repository is what the image bakes in, not a deployment.
 
 `local.cfg` is pulled into `kamailio.cfg` by `include_file` and defines:
 
@@ -113,12 +126,12 @@ docker run --rm --entrypoint cat ghcr.io/beiroun/thundervox-core:0.10.0 /etc/kam
 |---|---|
 | `TVX_SIP_DOMAIN` | DNS name of the server (preferred). Devices register to it and dial through it; when set, the core advertises it in Via/Record-Route and treats it as its own domain. |
 | `TVX_PUBLIC_IP` | Server public IP. Advertised instead of the domain when `TVX_SIP_DOMAIN` is absent; otherwise only accepted as "myself" for devices that dial by raw IP. Must equal the address rtpengine advertises (`TVX_PUBLIC_IP` in the deployment `.env`). **At least one of the two must be set.** |
-| `TVX_CORE_TOKEN` | Token sent as `X-CORE-TOKEN` to the provisioning server's internal API; must equal `TVX_CORE_TOKEN` in the deployment `.env` (used only with `TVX_PUSH_WAIT`). |
-| `TVX_SERVER_URL` | Base URL of the provisioning server's API, default `http://127.0.0.1:8080/api/v1` (used only with `TVX_PUSH_WAIT`). |
+| `TVX_CORE_TOKEN` | Token sent as `X-CORE-TOKEN` to the provisioning server's internal API; must equal `TVX_CORE_TOKEN` in the deployment `.env`. When set, the core reports call events to the server; `TVX_PUSH_WAIT` requires it. Leave it out only when there is no server. |
+| `TVX_SERVER_URL` | Base URL of the provisioning server's API, default `http://127.0.0.1:8080/api/v1` (used with `TVX_CORE_TOKEN`). |
 | `TVX_DB_URL` | `postgres://tvx_sip:<password>@127.0.0.1:5432/thundervox` — the provisioning database, role `tvx_sip` (created by the server's migration, password = `TVX_SIP_DB_PASSWORD` of the deployment `.env`). Used only with `TVX_PROVISIONING`. |
 
 With `TVX_TLS` a second file, `tls.cfg`, is mounted next to `local.cfg` (template
-`/etc/kamailio/tls.cfg.example` in the image). It names the certificate and the
+`deploy/tls.cfg.example` in the umbrella repository). It names the certificate and the
 key, which the deployment's edge proxy obtains and renews; `kamcmd tls.reload`
 re-reads it, so a renewal needs no restart and keeps the registrations.
 
@@ -127,7 +140,7 @@ Switches — `#!define NAME` lines in `local.cfg`, all **off** when absent:
 | Switch | Effect |
 |---|---|
 | `TVX_PROVISIONING` | Accounts and registrations from the provisioning server: `auth_db` checks REGISTER and INVITE against its `subscriber` table, `usrloc` writes registrations through to its `location` table (they survive a restart, the console shows who is online). Needs `TVX_SIP_DOMAIN` (the digest realm — it must equal the realm the server hashes with, `TVX_SIP_HOST` of the `.env`) and `TVX_DB_URL`; without them the config check fails with `TVX_PROVISIONING_NEEDS_…` tokens. Switch it on only after every device got its password. |
-| `TVX_PUSH_WAIT` | Park INVITEs for offline callees and ask the provisioning server to wake the device (it delivers the push to the operator's backend). Off: offline callee gets `480`. |
+| `TVX_PUSH_WAIT` | App clients (`1…`) are push-first: their INVITEs are parked for the wake window and the provisioning server is asked to wake the phones (it delivers the push to the operator's backend); the devices that register after the push are rung in parallel. Needs `TVX_CORE_TOKEN`. Off: a registered callee is simply rung, an offline one gets `480`. |
 | `TVX_ANTIFLOOD` | pike request-rate guard: more than 32 requests / 2 s from one IP are dropped. |
 | `TVX_TLS` | Accept SIPS on 5061 as well (plain 5060 stays open). Needs `TVX_SIP_DOMAIN` — a certificate is issued for a name, never for an IP — and a filled-in `tls.cfg`. Without the domain the config check fails with the token `TVX_TLS_NEEDS_TVX_SIP_DOMAIN_A_CERTIFICATE_IS_ISSUED_FOR_A_NAME_NOT_AN_IP`. |
 
@@ -200,18 +213,31 @@ With push-wait off (default) a call to an unregistered number is answered with
 a softphone that is not registered itself is answered with `403 Caller Not
 Registered`: register first, then dial.
 
-To exercise the **push-wait** path, define `TVX_PUSH_WAIT` in `local.cfg`,
-restart kamailio, let the callee go **unregistered**, place the call (caller
-hears ringing, a push fires), then REGISTER the callee — the parked call connects.
+To exercise the **push-first** path, define `TVX_PUSH_WAIT` in `local.cfg`,
+restart kamailio, and call a `1…` number (an app client): the caller hears
+ringing and a wake request reaches the server whether or not a softphone is
+registered under that number. Then make a softphone register **anew** (toggle
+the account off and on — a refresh with the same Call-ID does not count) — the
+parked call connects. Two softphones on the same number ring together and the
+one that answers ends the ringing of the other. A decline (`603`) from the only
+ringing softphone keeps the caller ringing until the window closes or another
+softphone registers.
 
 ---
 
 ## Known limitations / TODO
 
-- **Synchronous wake request.** `route[PUSH]` calls the provisioning server
-  synchronously; the server answers on loopback before any network work and
-  delivers the push to the operator's backend itself, so the worst case is the
-  server being down (`connection_timeout`, 2s), not a slow operator backend.
+- **Synchronous requests to the server.** `route[PUSH]` and the call events
+  call the provisioning server synchronously; the server answers on loopback
+  before any network work and delivers the push to the operator's backend
+  itself, so the worst case is the server being down (`connection_timeout`,
+  2 s per request), not a slow operator backend.
+- **One parked call per number.** While a flat is being woken, a second call to
+  the same number gets `486 Busy Here` instead of a second park.
+- **Losing branches keep their media legs.** The rtpengine sessions of the
+  phones that did not answer live until the call ends (the final delete drops
+  the whole call); a few relay ports per unanswered phone for the duration of
+  the call.
 - **Open without `TVX_PROVISIONING`.** With the switch off any host may register
   any number — closed tests only (calls are still accepted only from registered
   sources). `TVX_TLS` protects the channel, not the identity.
@@ -221,16 +247,15 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 - **The database is on the SIP path.** With `TVX_PROVISIONING` every REGISTER
   and INVITE reads PostgreSQL; a database outage locks every device out
   (logged as `auth ERROR rc=-1`).
-- **One contact per AoR.** A second device registering the same number replaces
-  the first. Multi-device users need parallel forking with per-branch rtpengine
-  sessions (`via-branch` in a branch route) — v1.
 - **Calls are not persisted.** `dialog` is in-memory: live calls are lost on a
   restart (registrations survive with `TVX_PROVISIONING`).
 - **Single node.** One Kamailio + one rtpengine. Horizontal scale (dispatcher to a
   media pool, HA registrar) is the v1 target.
-- **Dead contacts are discovered late.** A NATed device that vanished without
-  unregistering is only noticed when a call to it times out (`fr_timer` 30 s).
-  usrloc keepalive with OPTIONS and contact purging is a v1 item.
+- **Dead UDP contacts are discovered late.** A NATed UDP device that vanished
+  without unregistering stays in the table until its registration expires
+  (`max_expires`, 1 h) or a call to it times out. TCP/TLS contacts are dropped
+  with their connection (`handle_lost_tcp`); usrloc keepalive with OPTIONS for
+  UDP contacts is a v1 item.
 
 ---
 
@@ -245,8 +270,14 @@ hears ringing, a push fires), then REGISTER the callee — the parked call conne
 - **v0.9** — SIP over TLS (`TVX_TLS`) with the certificate of the edge proxy.
 - **v0.10** — provisioning: digest authentication from PostgreSQL
   (`TVX_PROVISIONING`, `auth_db`), registrations persisted (`usrloc`
-  write-through) *(current)*. Next: JSON-RPC for the server (evict a
-  registration, end a call).
+  write-through).
+- **v0.11** — the wake request goes through the provisioning server (the
+  push gateway lives on the console's Integration page).
+- **v0.12** — several devices per number with parallel forking and per-branch
+  media, push-first app clients with a wake window (`t_suspend`/`t_continue`
+  instead of tsilo), TCP liveness (`handle_lost_tcp`), call events to the
+  server *(current)*. Next: JSON-RPC for the server (evict a registration, end
+  a call).
 - **v1** — Kubernetes: stateless Kamailio edge (HA), rtpengine media pool behind
   `dispatcher`, Redis-backed presence, async push service.
 

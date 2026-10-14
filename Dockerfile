@@ -7,7 +7,7 @@
 # Published as ghcr.io/beiroun/thundervox-core:<version> by CI on a tagged release.
 #
 # Module set: Kamailio's default group (every module without external dependencies: tm, sl, rr, usrloc,
-# registrar, auth, auth_db, htable, dialog, nathelper, rtpengine, tsilo, pike, xhttp, jsonrpcs, ctl, ...)
+# registrar, tmx, auth, auth_db, htable, dialog, nathelper, rtpengine, pike, xhttp, jsonrpcs, ctl, ...)
 # plus the three that need libraries: db_postgres (libpq, the provisioning layer), http_client (libcurl,
 # the push gateway) and tls (openssl, SIPS on 5061 - group mod_list_tlsdeps, never part of the default group).
 # Build and install follow the INSTALL file of the Kamailio source tree:
@@ -64,9 +64,10 @@ RUN groupadd --gid 1001 kamailio \
  && chown kamailio:kamailio /run/kamailio
 
 # The ThunderVox routing logic lives in the image; it pulls /etc/kamailio/local.cfg (mounted) for site values.
-# The template of that file ships with the image too, so the deployment needs no copy of it:
-#   docker run --rm --entrypoint cat <image> /etc/kamailio/local.cfg.example > local.cfg
-COPY config/kamailio.cfg config/local.cfg.example config/tls.cfg.example /etc/kamailio/
+# The templates of local.cfg and tls.cfg live next to the live files, in the umbrella repository
+# (thundervox/deploy/local.cfg.example, tls.cfg.example) - the deployment is one directory, the image carries
+# only what never changes per site.
+COPY config/kamailio.cfg /etc/kamailio/
 
 USER kamailio
 # Host-networked in the compose deployment; informational (5061 only with TVX_TLS)
