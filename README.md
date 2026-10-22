@@ -99,8 +99,15 @@ on the console's Integration page — plain calls between registered devices
 | `Dockerfile` | Core image: Kamailio **6.0.8 built from source** (default module group + `db_postgres`, `http_client`, `tls`), `kamailio.cfg` baked in, non-root with a pinned uid 1001 (so it can read the certificate the edge proxy obtained) |
 | `rtpengine/Dockerfile`, `rtpengine/entrypoint.sh` | Media image: rtpengine **mr26.2.1.2 built from source**, userspace forwarding, every parameter an explicit flag from `TVX_*` environment |
 | `docker/runtime-deps.sh` | Build helper: derives the runtime Debian packages from what the binaries actually link against |
+| `docker/apt-snapshot.sh` | Build helper: points apt at the snapshot.debian.org state the pinned base image was built from, so the packages are pinned with the image (see "Pinned inputs") |
 | `.github/workflows/` | `ci.yml` builds both images and runs `kamailio -c` on every push to `release`; `release.yml` publishes `ghcr.io/beiroun/thundervox-core` and `…/thundervox-rtpengine` on a `vX.Y.Z` tag |
 | *(external)* provisioning server | `thundervox-server`: the core asks it on loopback to wake a sleeping callee; the server delivers the push to the operator's backend configured on the console's Integration page — **not** in this repo |
+
+**Pinned inputs.** Nothing in a build floats (rule of 2026-10-22): the Dockerfile frontend, the Debian base
+(`trixie-<date>-slim` + digest), the apt packages (the base image's own snapshot.debian.org state, via
+`docker/apt-snapshot.sh`; the build stops if the image does not name one), the Kamailio and rtpengine sources
+(tag + the commit it must point at), the GitHub Actions (commit SHA), buildx and BuildKit, the runner
+(`ubuntu-24.04`). A bump changes a pin deliberately, after checking that the new tag resolves and downloads.
 
 **NAT strategy:** the *received* method for registered devices
 (`fix_nated_register` + `received_avp`) and the *alias* method for the other
